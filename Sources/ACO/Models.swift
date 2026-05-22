@@ -121,7 +121,7 @@ public struct ACOEvent: Codable {
     public let screenId: String?
     public let experimentId: String?
     public let variantId: String?
-    public var properties: [String: String]?
+    public var properties: [String: AnyCodable]?
 
     public init(
         eventType: String,
@@ -130,7 +130,7 @@ public struct ACOEvent: Codable {
         screenId: String? = nil,
         experimentId: String? = nil,
         variantId: String? = nil,
-        properties: [String: String]? = nil
+        properties: [String: AnyCodable]? = nil
     ) {
         self.eventType = eventType
         self.eventName = eventName
