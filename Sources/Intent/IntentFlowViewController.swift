@@ -1,19 +1,25 @@
 import UIKit
+import StoreKit
 
-/// Renders an ACO flow schema as a native UIKit view controller.
+/// Renders an Intent flow schema as a native UIKit view controller.
 /// Presented modally, it navigates through screens and calls onComplete/onDismiss.
 ///
+/// Paywall screens (`type: "paywall"` or `"paywall_soft"`) automatically:
+///   - Load real App Store prices via StoreKit 2 (requires `productId` on each pricing option)
+///   - Handle purchase, transaction verification, and revenue attribution
+///   - Advance the flow on successful purchase
+///
 /// Usage:
-///   let vc = ACOFlowViewController(flow: flow, onComplete: {
+///   let vc = IntentFlowViewController(flow: flow, onComplete: {
 ///       // user finished — navigate to main app
 ///   })
 ///   present(vc, animated: true)
-public final class ACOFlowViewController: UIViewController {
+public final class IntentFlowViewController: UIViewController {
 
     // MARK: - Properties
 
-    private let flow: ACOFlow
-    private let onComplete: () -> Void
+    private let flow: IntentFlow
+    private let onComplete: (() -> Void)?
     private let onDismiss: (() -> Void)?
 
     private var screenIndex = 0
@@ -22,6 +28,14 @@ public final class ACOFlowViewController: UIViewController {
 
     private var screens: [FlowScreen] { flow.schema.screens }
     private var currentScreen: FlowScreen? { screens[safe: screenIndex] }
+
+    // MARK: - Paywall / StoreKit state
+
+    private var isPaywallScreen = false
+    private var paywallOptions: [PaywallOption] = []
+    private var paywallCards: [PricingCardView] = []
+    private var selectedPaywallIndex: Int? = nil
+    private var paywallProductLoadTask: Task<Void, Never>? = nil
 
     // MARK: - UI
 
@@ -33,8 +47,8 @@ public final class ACOFlowViewController: UIViewController {
     // MARK: - Init
 
     public init(
-        flow: ACOFlow,
-        onComplete: @escaping () -> Void,
+        flow: IntentFlow,
+        onComplete: (() -> Void)?,
         onDismiss: (() -> Void)? = nil
     ) {
         self.flow = flow
@@ -52,6 +66,8 @@ public final class ACOFlowViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         setupLayout()
+        Intent.shared.trackFlowStart(flowId: flow.id)
+        Intent.shared.trackFlowPresented(flowId: flow.id)
         renderCurrentScreen()
     }
 
@@ -60,7 +76,6 @@ public final class ACOFlowViewController: UIViewController {
     private func setupLayout() {
         view.backgroundColor = theme.background
 
-        // Progress bar
         progressView.translatesAutoresizingMaskIntoConstraints = false
         progressView.progressTintColor = theme.primary
         progressView.trackTintColor = theme.secondary
@@ -68,7 +83,6 @@ public final class ACOFlowViewController: UIViewController {
         progressView.clipsToBounds = true
         view.addSubview(progressView)
 
-        // Skip button
         skipButton.translatesAutoresizingMaskIntoConstraints = false
         skipButton.setTitle("Skip", for: .normal)
         skipButton.setTitleColor(theme.foreground.withAlphaComponent(0.5), for: .normal)
@@ -77,39 +91,33 @@ public final class ACOFlowViewController: UIViewController {
         skipButton.isHidden = !(flow.schema.settings?.canSkip ?? false)
         view.addSubview(skipButton)
 
-        // Scroll view
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.showsVerticalScrollIndicator = false
         scrollView.alwaysBounceVertical = true
         view.addSubview(scrollView)
 
-        // Content stack
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
         contentStack.spacing = 20
         contentStack.alignment = .fill
         scrollView.addSubview(contentStack)
 
-        let safeArea = view.safeAreaLayoutGuide
+        let safe = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            // Progress
-            progressView.topAnchor.constraint(equalTo: safeArea.topAnchor, constant: 16),
+            progressView.topAnchor.constraint(equalTo: safe.topAnchor, constant: 16),
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
             progressView.heightAnchor.constraint(equalToConstant: 4),
 
-            // Skip button
             skipButton.centerYAnchor.constraint(equalTo: progressView.centerYAnchor),
             skipButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             skipButton.leadingAnchor.constraint(equalTo: progressView.trailingAnchor, constant: 12),
             skipButton.widthAnchor.constraint(equalToConstant: 40),
 
-            // Scroll view
             scrollView.topAnchor.constraint(equalTo: progressView.bottomAnchor, constant: 20),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            // Content stack
             contentStack.topAnchor.constraint(equalTo: scrollView.topAnchor),
             contentStack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 24),
             contentStack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -24),
@@ -124,15 +132,22 @@ public final class ACOFlowViewController: UIViewController {
         guard let screen = currentScreen else { return }
 
         // Update progress
-        let progress = Float(screenIndex + 1) / Float(max(screens.count, 1))
         if flow.schema.settings?.showProgress != false {
+            let progress = Float(screenIndex + 1) / Float(max(screens.count, 1))
             progressView.setProgress(progress, animated: screenIndex > 0)
         }
 
-        // Track screen view
-        ACO.shared.trackScreenView(screenId: screen.id, flowId: flow.id)
+        Intent.shared.trackScreenView(screenId: screen.id, flowId: flow.id)
 
-        // Handle loading screen (auto-advance)
+        // Reset paywall state for every screen transition
+        isPaywallScreen = screen.type == "paywall" || screen.type == "paywall_soft"
+        paywallOptions = []
+        paywallCards = []
+        selectedPaywallIndex = nil
+        paywallProductLoadTask?.cancel()
+        paywallProductLoadTask = nil
+
+        // Loading screens auto-advance
         if screen.type == "loading" {
             renderLoadingScreen(screen)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -141,7 +156,6 @@ public final class ACOFlowViewController: UIViewController {
             return
         }
 
-        // Clear and rebuild content
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         for component in screen.components {
@@ -149,26 +163,30 @@ public final class ACOFlowViewController: UIViewController {
                 contentStack.addArrangedSubview(view)
             }
         }
+
+        // After building paywall UI: select default plan, load real prices, inject restore button
+        if isPaywallScreen && !paywallOptions.isEmpty {
+            let defaultIdx = paywallOptions.firstIndex(where: { $0.highlighted }) ?? 0
+            selectPaywallOption(at: defaultIdx)
+            startPaywallProductLoad()
+            injectRestoreButton()
+        }
     }
 
     private func renderLoadingScreen(_ screen: FlowScreen) {
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let container = UIView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-
         let spinner = UIActivityIndicatorView(style: .large)
         spinner.color = theme.primary
         spinner.startAnimating()
         spinner.translatesAutoresizingMaskIntoConstraints = false
-
         container.addSubview(spinner)
         NSLayoutConstraint.activate([
             spinner.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             spinner.topAnchor.constraint(equalTo: container.topAnchor, constant: 60),
             container.bottomAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 40),
         ])
-
         contentStack.addArrangedSubview(container)
 
         for component in screen.components where component.type == "heading" || component.type == "subheading" {
@@ -227,7 +245,6 @@ public final class ACOFlowViewController: UIViewController {
         case "options", "quiz_option":
             let quizKey = props["quizKey"]?.stringValue ?? screen.metadata?.quizKey ?? "answer"
             let multiSelect = screen.metadata?.multiSelect ?? false
-            // Options come from metadata.quizOptions OR (more commonly) props["options"]
             var options = screen.metadata?.quizOptions ?? []
             if options.isEmpty, let rawOptions = props["options"]?.arrayValue as? [[String: Any]] {
                 options = rawOptions.compactMap { d in
@@ -277,7 +294,18 @@ public final class ACOFlowViewController: UIViewController {
         // ── Pricing ───────────────────────────────────────────────────────────
 
         case "pricing", "price_card", "pricing_option":
-            let rawOptions = props["options"]?.arrayValue as? [[String: Any]] ?? []
+            // "options" key (price_card / pricing_option components)
+            // "plans" key (paywall / pricing components — older builder format)
+            // SDK handles both; maps "plans" fields to the unified option format.
+            var rawOptions = props["options"]?.arrayValue as? [[String: Any]] ?? []
+            if rawOptions.isEmpty, let rawPlans = props["plans"]?.arrayValue as? [[String: Any]] {
+                rawOptions = rawPlans.map { p in
+                    var mapped = p
+                    if mapped["label"] == nil { mapped["label"] = p["name"] }
+                    if mapped["perMonth"] == nil { mapped["perMonth"] = p["period"] }
+                    return mapped
+                }
+            }
             return makePricingStack(options: rawOptions)
 
         // ── Guarantee ─────────────────────────────────────────────────────────
@@ -305,7 +333,6 @@ public final class ACOFlowViewController: UIViewController {
         label.font = font
         label.textColor = color
         label.numberOfLines = lines
-        label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }
 
@@ -323,8 +350,8 @@ public final class ACOFlowViewController: UIViewController {
         container.addSubview(label)
 
         let wrapper = UIView()
-        wrapper.addSubview(container)
         container.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
 
         NSLayoutConstraint.activate([
             label.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
@@ -346,7 +373,13 @@ public final class ACOFlowViewController: UIViewController {
         btn.backgroundColor = theme.primary
         btn.layer.cornerRadius = theme.radius
         btn.heightAnchor.constraint(equalToConstant: 54).isActive = true
-        btn.addTarget(self, action: #selector(didTapNext), for: .touchUpInside)
+
+        // Paywall screens purchase instead of advance
+        if isPaywallScreen {
+            btn.addTarget(self, action: #selector(handlePaywallPurchaseTap), for: .touchUpInside)
+        } else {
+            btn.addTarget(self, action: #selector(didTapNext), for: .touchUpInside)
+        }
         return btn
     }
 
@@ -404,8 +437,7 @@ public final class ACOFlowViewController: UIViewController {
         }
 
         if multiSelect {
-            let continueBtn = makePrimaryButton(title: "Continue")
-            stack.addArrangedSubview(continueBtn)
+            stack.addArrangedSubview(makePrimaryButton(title: "Continue"))
         }
 
         return stack
@@ -439,7 +471,6 @@ public final class ACOFlowViewController: UIViewController {
             row.addArrangedSubview(textLabel)
             stack.addArrangedSubview(row)
         }
-
         return stack
     }
 
@@ -455,7 +486,6 @@ public final class ACOFlowViewController: UIViewController {
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
-
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
             stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
@@ -472,7 +502,7 @@ public final class ACOFlowViewController: UIViewController {
         }
 
         let quoteLabel = UILabel()
-        quoteLabel.text = ""\(quote)""
+        quoteLabel.text = "\"\(quote)\""
         quoteLabel.font = .italicSystemFont(ofSize: 15)
         quoteLabel.textColor = theme.foreground
         quoteLabel.numberOfLines = 0
@@ -485,7 +515,6 @@ public final class ACOFlowViewController: UIViewController {
             authorLabel.textColor = theme.foreground.withAlphaComponent(0.5)
             stack.addArrangedSubview(authorLabel)
         }
-
         return card
     }
 
@@ -518,91 +547,91 @@ public final class ACOFlowViewController: UIViewController {
             col.addArrangedSubview(lblLabel)
             stack.addArrangedSubview(col)
         }
-
         return stack
     }
 
+    // MARK: - Pricing stack (paywall)
+
+    /// Builds the pricing cards. For paywall screens, cards are tappable (select plan)
+    /// and prices update to real App Store values after `loadPaywallProducts()` completes.
     private func makePricingStack(options: [[String: Any]]) -> UIView {
         let stack = UIStackView()
         stack.axis = .vertical
         stack.spacing = 12
 
-        for option in options {
-            let highlighted = option["highlighted"] as? Bool ?? false
-            let card = UIView()
-            card.backgroundColor = highlighted ? theme.primary.withAlphaComponent(0.1) : theme.secondary
-            card.layer.cornerRadius = theme.radius
-            card.layer.borderWidth = highlighted ? 2 : 1
-            card.layer.borderColor = highlighted
-                ? theme.primary.cgColor
-                : theme.foreground.withAlphaComponent(0.12).cgColor
+        // Reset paywall card tracking
+        paywallCards = []
+        paywallOptions = []
 
-            let inner = UIStackView()
-            inner.axis = .vertical
-            inner.spacing = 4
-            inner.translatesAutoresizingMaskIntoConstraints = false
-            card.addSubview(inner)
+        for (index, option) in options.enumerated() {
+            let wo = PaywallOption(
+                label: option["label"] as? String ?? "",
+                productId: option["productId"] as? String,
+                fallbackPrice: option["price"] as? String ?? "",
+                fallbackPerMonth: option["perMonth"] as? String,
+                badge: option["badge"] as? String,
+                highlighted: option["highlighted"] as? Bool ?? false
+            )
+            paywallOptions.append(wo)
 
-            NSLayoutConstraint.activate([
-                inner.topAnchor.constraint(equalTo: card.topAnchor, constant: 18),
-                inner.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
-                inner.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
-                inner.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -18),
-            ])
-
-            if let badge = option["badge"] as? String {
-                let badgeView = UIView()
-                badgeView.backgroundColor = theme.primary
-                badgeView.layer.cornerRadius = 100
-                badgeView.translatesAutoresizingMaskIntoConstraints = false
-
-                let badgeLabel = UILabel()
-                badgeLabel.text = badge
-                badgeLabel.font = .systemFont(ofSize: 11, weight: .bold)
-                badgeLabel.textColor = .white
-                badgeLabel.translatesAutoresizingMaskIntoConstraints = false
-                badgeView.addSubview(badgeLabel)
-
-                let badgeWrapper = UIView()
-                badgeWrapper.addSubview(badgeView)
-                badgeView.translatesAutoresizingMaskIntoConstraints = false
-
-                NSLayoutConstraint.activate([
-                    badgeLabel.topAnchor.constraint(equalTo: badgeView.topAnchor, constant: 4),
-                    badgeLabel.bottomAnchor.constraint(equalTo: badgeView.bottomAnchor, constant: -4),
-                    badgeLabel.leadingAnchor.constraint(equalTo: badgeView.leadingAnchor, constant: 10),
-                    badgeLabel.trailingAnchor.constraint(equalTo: badgeView.trailingAnchor, constant: -10),
-                    badgeView.topAnchor.constraint(equalTo: badgeWrapper.topAnchor),
-                    badgeView.bottomAnchor.constraint(equalTo: badgeWrapper.bottomAnchor),
-                    badgeView.leadingAnchor.constraint(equalTo: badgeWrapper.leadingAnchor),
-                ])
-                inner.addArrangedSubview(badgeWrapper)
+            if isPaywallScreen {
+                let card = PricingCardView(option: wo, theme: theme) { [weak self] in
+                    self?.selectPaywallOption(at: index)
+                }
+                paywallCards.append(card)
+                stack.addArrangedSubview(card)
+            } else {
+                stack.addArrangedSubview(makeStaticPricingCard(option: option))
             }
-
-            let planLabel = UILabel()
-            planLabel.text = option["label"] as? String ?? ""
-            planLabel.font = .systemFont(ofSize: 14, weight: .medium)
-            planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
-            inner.addArrangedSubview(planLabel)
-
-            let priceLabel = UILabel()
-            priceLabel.text = option["price"] as? String ?? ""
-            priceLabel.font = .systemFont(ofSize: 22, weight: .black)
-            priceLabel.textColor = highlighted ? theme.primary : theme.foreground
-            inner.addArrangedSubview(priceLabel)
-
-            if let perMonth = option["perMonth"] as? String {
-                let perMonthLabel = UILabel()
-                perMonthLabel.text = perMonth
-                perMonthLabel.font = .systemFont(ofSize: 13)
-                perMonthLabel.textColor = theme.foreground.withAlphaComponent(0.5)
-                inner.addArrangedSubview(perMonthLabel)
-            }
-
-            stack.addArrangedSubview(card)
         }
 
         return stack
+    }
+
+    /// Non-paywall static pricing card (read-only, used on value_prop screens etc.)
+    private func makeStaticPricingCard(option: [String: Any]) -> UIView {
+        let highlighted = option["highlighted"] as? Bool ?? false
+        let card = UIView()
+        card.backgroundColor = highlighted ? theme.primary.withAlphaComponent(0.1) : theme.secondary
+        card.layer.cornerRadius = theme.radius
+        card.layer.borderWidth = highlighted ? 2 : 1
+        card.layer.borderColor = highlighted
+            ? theme.primary.cgColor
+            : theme.foreground.withAlphaComponent(0.12).cgColor
+
+        let inner = UIStackView()
+        inner.axis = .vertical
+        inner.spacing = 4
+        inner.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(inner)
+        NSLayoutConstraint.activate([
+            inner.topAnchor.constraint(equalTo: card.topAnchor, constant: 18),
+            inner.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 18),
+            inner.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -18),
+            inner.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -18),
+        ])
+
+        let planLabel = UILabel()
+        planLabel.text = option["label"] as? String ?? ""
+        planLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
+        inner.addArrangedSubview(planLabel)
+
+        let priceLabel = UILabel()
+        priceLabel.text = option["price"] as? String ?? ""
+        priceLabel.font = .systemFont(ofSize: 22, weight: .black)
+        priceLabel.textColor = highlighted ? theme.primary : theme.foreground
+        inner.addArrangedSubview(priceLabel)
+
+        if let perMonth = option["perMonth"] as? String {
+            let pm = UILabel()
+            pm.text = perMonth
+            pm.font = .systemFont(ofSize: 13)
+            pm.textColor = theme.foreground.withAlphaComponent(0.5)
+            inner.addArrangedSubview(pm)
+        }
+
+        return card
     }
 
     private func makeGuaranteeRow(text: String) -> UIView {
@@ -611,22 +640,22 @@ public final class ACOFlowViewController: UIViewController {
         stack.spacing = 8
         stack.alignment = .center
 
-        let iconLabel = UILabel()
-        iconLabel.text = "🛡️"
-        iconLabel.font = .systemFont(ofSize: 16)
+        let icon = UILabel()
+        icon.text = "🛡️"
+        icon.font = .systemFont(ofSize: 16)
 
-        let textLabel = UILabel()
-        textLabel.text = text
-        textLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        textLabel.textColor = theme.foreground.withAlphaComponent(0.5)
-        textLabel.numberOfLines = 0
+        let label = UILabel()
+        label.text = text
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = theme.foreground.withAlphaComponent(0.5)
+        label.numberOfLines = 0
 
-        stack.addArrangedSubview(iconLabel)
-        stack.addArrangedSubview(textLabel)
+        stack.addArrangedSubview(icon)
+        stack.addArrangedSubview(label)
 
         let wrapper = UIView()
-        wrapper.addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: wrapper.centerXAnchor),
             stack.topAnchor.constraint(equalTo: wrapper.topAnchor),
@@ -636,9 +665,181 @@ public final class ACOFlowViewController: UIViewController {
         return wrapper
     }
 
+    // MARK: - Paywall: plan selection
+
+    private func selectPaywallOption(at index: Int) {
+        selectedPaywallIndex = index
+        for (i, card) in paywallCards.enumerated() {
+            card.setSelected(i == index)
+        }
+    }
+
+    // MARK: - Paywall: StoreKit product loading
+
+    private func startPaywallProductLoad() {
+        guard #available(iOS 15, *) else { return }
+        let ids = paywallOptions.compactMap { $0.productId }
+        guard !ids.isEmpty else { return }
+
+        paywallProductLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let products = try? await IntentPurchaseManager.shared.loadProducts(ids: ids) else { return }
+            guard !Task.isCancelled else { return }
+
+            // Update each card with real App Store price in the user's locale
+            for (index, option) in self.paywallOptions.enumerated() {
+                guard index < self.paywallCards.count else { break }
+                guard let productId = option.productId,
+                      let product = products.first(where: { $0.id == productId }) else { continue }
+
+                // Build per-period breakdown for subscriptions
+                var perMonth: String? = nil
+                if #available(iOS 15, *), let sub = product.subscription {
+                    let period = sub.subscriptionPeriod
+                    // e.g. annual plan → "£X.XX / month"
+                    if period.unit == .year && period.value == 1 {
+                        let monthly = NSDecimalNumber(decimal: product.price)
+                            .dividing(by: 12, withBehavior: NSDecimalNumberHandler(
+                                roundingMode: .plain, scale: 2,
+                                raiseOnExactness: false, raiseOnOverflow: false,
+                                raiseOnUnderflow: false, raiseOnDivideByZero: false
+                            ))
+                        perMonth = "\(product.priceFormatStyle.format(monthly.decimalValue)) / month"
+                    }
+
+                    // Show free trial info if available
+                    if let offer = sub.introductoryOffer, offer.paymentMode == .freeTrial {
+                        let p = offer.period
+                        let unitStr: String
+                        switch p.unit {
+                        case .day:   unitStr = p.value == 1 ? "day"   : "\(p.value) days"
+                        case .week:  unitStr = p.value == 1 ? "week"  : "\(p.value) weeks"
+                        case .month: unitStr = p.value == 1 ? "month" : "\(p.value) months"
+                        case .year:  unitStr = p.value == 1 ? "year"  : "\(p.value) years"
+                        @unknown default: unitStr = "period"
+                        }
+                        perMonth = "Try free for \(unitStr), then \(product.displayPrice)"
+                    }
+                }
+
+                self.paywallCards[index].updatePrice(product.displayPrice, perMonth: perMonth)
+            }
+        }
+    }
+
+    // MARK: - Paywall: restore purchases button
+
+    /// Injects a centred "Restore Purchases" link below all other content on paywall screens.
+    /// Required by App Store guideline 3.1.1 — apps must provide a restore mechanism.
+    private func injectRestoreButton() {
+        let btn = UIButton(type: .system)
+        btn.setTitle("Restore Purchases", for: .normal)
+        btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
+        btn.setTitleColor(theme.foreground.withAlphaComponent(0.4), for: .normal)
+        btn.addTarget(self, action: #selector(handleRestorePurchases), for: .touchUpInside)
+        contentStack.addArrangedSubview(btn)
+    }
+
+    @objc private func handleRestorePurchases() {
+        guard #available(iOS 15, *) else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let active = await IntentPurchaseManager.shared.currentEntitlements()
+            if let first = active.first {
+                Intent.shared.subscriptionStatus = .active(productId: first)
+                self.goNext()
+            } else {
+                self.showAlert(
+                    title: "No Purchases Found",
+                    message: "No active subscriptions were found for your Apple ID."
+                )
+            }
+        }
+    }
+
+    // MARK: - Paywall: purchase
+
+    @objc private func handlePaywallPurchaseTap() {
+        let index = selectedPaywallIndex
+            ?? paywallOptions.firstIndex(where: { $0.highlighted })
+            ?? 0
+
+        guard index < paywallOptions.count else { goNext(); return }
+        let option = paywallOptions[index]
+
+        // No StoreKit product ID — treat as a soft paywall, advance normally
+        guard let productId = option.productId else {
+            goNext()
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            await self?.executePurchase(productId: productId, cardIndex: index)
+        }
+    }
+
+    @MainActor
+    private func executePurchase(productId: String, cardIndex: Int) async {
+        guard #available(iOS 15, *) else { goNext(); return }
+
+        // Track intent
+        Intent.shared.trackPurchaseStarted(
+            flowId: flow.id,
+            screenId: currentScreen?.id,
+            properties: ["product_id": AnyCodable(productId)]
+        )
+
+        // Show loading on the selected card
+        if cardIndex < paywallCards.count {
+            paywallCards[cardIndex].setLoading(true)
+        }
+
+        // Fetch the product (may already be cached by the OS)
+        guard let products = try? await IntentPurchaseManager.shared.loadProducts(ids: [productId]),
+              let product = products.first else {
+            if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
+            showAlert(title: "Couldn't Load Product", message: "Please check your connection and try again.")
+            return
+        }
+
+        do {
+            let result = try await IntentPurchaseManager.shared.purchase(
+                product: product,
+                flowId: flow.id,
+                screenId: currentScreen?.id
+            )
+
+            if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
+
+            switch result {
+            case .success:
+                goNext()
+
+            case .cancelled:
+                break  // Stay on paywall — user can try again
+
+            case .pending:
+                showAlert(
+                    title: "Purchase Pending",
+                    message: "Your purchase is awaiting approval. You'll unlock access once it's approved."
+                )
+            }
+        } catch {
+            if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
+            showAlert(title: "Purchase Failed", message: error.localizedDescription)
+        }
+    }
+
+    private func showAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
+    }
+
     // MARK: - Navigation
 
     @objc private func didTapNext() { goNext() }
+
     @objc private func didTapSkip() {
         let behavior = flow.schema.settings?.exitBehavior ?? "dismiss"
         if behavior == "block" { return }
@@ -648,9 +849,9 @@ public final class ACOFlowViewController: UIViewController {
 
     private func goNext() {
         if screenIndex >= screens.count - 1 {
-            ACO.shared.trackFlowComplete(flowId: flow.id)
+            Intent.shared.trackFlowComplete(flowId: flow.id)
             dismiss(animated: true) { [weak self] in
-                self?.onComplete()
+                self?.onComplete?()
             }
         } else {
             screenIndex += 1
@@ -662,15 +863,175 @@ public final class ACOFlowViewController: UIViewController {
     }
 }
 
-// MARK: - Option card view
+// MARK: - PaywallOption
+
+/// Data model for a single pricing option on a paywall screen.
+private struct PaywallOption {
+    let label: String
+    let productId: String?         // App Store product identifier — nil = no StoreKit purchase
+    let fallbackPrice: String      // Shown while StoreKit loads or if no productId
+    let fallbackPerMonth: String?
+    let badge: String?
+    let highlighted: Bool
+}
+
+// MARK: - PricingCardView
+
+/// Selectable pricing card for paywall screens. Supports:
+///   - Selected state with animated border/background
+///   - Real-price update after StoreKit loads
+///   - Loading indicator during purchase
+private final class PricingCardView: UIView {
+
+    private let option: PaywallOption
+    private let theme: ResolvedTheme
+    private let onTap: () -> Void
+
+    private let priceLabel = UILabel()
+    private let perMonthLabel = UILabel()
+    private let loadingIndicator = UIActivityIndicatorView(style: .medium)
+
+    private var _isSelected = false
+
+    init(option: PaywallOption, theme: ResolvedTheme, onTap: @escaping () -> Void) {
+        self.option = option
+        self.theme = theme
+        self.onTap = onTap
+        super.init(frame: .zero)
+        setup()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        layer.cornerRadius = theme.radius
+        layer.borderWidth = 1.5
+        updateAppearance()
+
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+
+        let inner = UIStackView()
+        inner.axis = .vertical
+        inner.spacing = 4
+        inner.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(inner)
+        NSLayoutConstraint.activate([
+            inner.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+            inner.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+            inner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+            inner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
+        ])
+
+        // Badge
+        if let badge = option.badge {
+            inner.addArrangedSubview(makeBadge(text: badge))
+        }
+
+        // Plan label
+        let planLabel = UILabel()
+        planLabel.text = option.label
+        planLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
+        inner.addArrangedSubview(planLabel)
+
+        // Price
+        priceLabel.text = option.fallbackPrice
+        priceLabel.font = .systemFont(ofSize: 22, weight: .black)
+        priceLabel.textColor = option.highlighted ? theme.primary : theme.foreground
+        inner.addArrangedSubview(priceLabel)
+
+        // Per-month breakdown (e.g. "£2.50 / week")
+        if let pm = option.fallbackPerMonth, !pm.isEmpty {
+            perMonthLabel.text = pm
+            perMonthLabel.font = .systemFont(ofSize: 13)
+            perMonthLabel.textColor = theme.foreground.withAlphaComponent(0.5)
+            inner.addArrangedSubview(perMonthLabel)
+        }
+
+        // Loading spinner (top-right, hidden until purchase starts)
+        loadingIndicator.color = theme.primary
+        loadingIndicator.hidesWhenStopped = true
+        loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(loadingIndicator)
+        NSLayoutConstraint.activate([
+            loadingIndicator.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            loadingIndicator.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    private func makeBadge(text: String) -> UIView {
+        let container = UIView()
+        container.backgroundColor = theme.primary
+        container.layer.cornerRadius = 100
+
+        let label = UILabel()
+        label.text = text
+        label.font = .systemFont(ofSize: 11, weight: .bold)
+        label.textColor = .white
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        let wrapper = UIView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+        ])
+        return wrapper
+    }
+
+    // MARK: - Public interface
+
+    /// Update the displayed price with a real App Store localized price string.
+    func updatePrice(_ price: String, perMonth: String?) {
+        priceLabel.text = price
+        if let pm = perMonth, !pm.isEmpty {
+            perMonthLabel.text = pm
+            perMonthLabel.isHidden = false
+        }
+    }
+
+    func setSelected(_ selected: Bool) {
+        _isSelected = selected
+        UIView.animate(withDuration: 0.18) { self.updateAppearance() }
+    }
+
+    func setLoading(_ loading: Bool) {
+        loading ? loadingIndicator.startAnimating() : loadingIndicator.stopAnimating()
+        isUserInteractionEnabled = !loading
+    }
+
+    private func updateAppearance() {
+        let selectedOrHighlighted = _isSelected || option.highlighted
+        backgroundColor = _isSelected
+            ? theme.primary.withAlphaComponent(0.15)
+            : option.highlighted
+            ? theme.primary.withAlphaComponent(0.07)
+            : theme.secondary
+        layer.borderColor = _isSelected
+            ? theme.primary.cgColor
+            : option.highlighted
+            ? theme.primary.withAlphaComponent(0.4).cgColor
+            : theme.foreground.withAlphaComponent(0.12).cgColor
+        _ = selectedOrHighlighted  // suppress unused warning
+    }
+
+    @objc private func tapped() { onTap() }
+}
+
+// MARK: - Option card view (quiz)
 
 private final class OptionCardView: UIView {
     private let option: QuizOption
     private let theme: ResolvedTheme
     private var _isSelected: () -> Bool
     private let onTap: () -> Void
-
-    private let borderLayer = CALayer()
     private let checkView = UIView()
 
     init(option: QuizOption, theme: ResolvedTheme, isSelected: @escaping () -> Bool, onTap: @escaping () -> Void) {
@@ -688,9 +1049,7 @@ private final class OptionCardView: UIView {
         layer.cornerRadius = theme.radius
         layer.borderWidth = 1.5
         updateColors()
-
-        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
-        addGestureRecognizer(tap)
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
 
         let row = UIStackView()
         row.axis = .horizontal
@@ -728,7 +1087,7 @@ private final class OptionCardView: UIView {
         }
 
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(UIView()) // Spacer
+        row.addArrangedSubview(UIView()) // spacer
 
         checkView.backgroundColor = theme.primary
         checkView.layer.cornerRadius = 11
@@ -748,7 +1107,6 @@ private final class OptionCardView: UIView {
         ])
 
         row.addArrangedSubview(checkView)
-
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor, constant: 16),
             row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
@@ -758,9 +1116,7 @@ private final class OptionCardView: UIView {
     }
 
     func updateSelection(_ selected: Bool) {
-        UIView.animate(withDuration: 0.18) {
-            self.updateColors()
-        }
+        UIView.animate(withDuration: 0.18) { self.updateColors() }
     }
 
     private func updateColors() {
@@ -803,24 +1159,22 @@ extension UIColor {
     convenience init(hex: String) {
         var str = hex.trimmingCharacters(in: .whitespacesAndNewlines)
         if str.hasPrefix("#") { str = String(str.dropFirst()) }
-
         var rgb: UInt64 = 0
         Scanner(string: str).scanHexInt64(&rgb)
-
         let length = str.count
         if length == 6 {
             self.init(
-                red: CGFloat((rgb >> 16) & 0xFF) / 255,
-                green: CGFloat((rgb >> 8) & 0xFF) / 255,
-                blue: CGFloat(rgb & 0xFF) / 255,
+                red:   CGFloat((rgb >> 16) & 0xFF) / 255,
+                green: CGFloat((rgb >>  8) & 0xFF) / 255,
+                blue:  CGFloat( rgb        & 0xFF) / 255,
                 alpha: 1
             )
         } else if length == 8 {
             self.init(
-                red: CGFloat((rgb >> 24) & 0xFF) / 255,
+                red:   CGFloat((rgb >> 24) & 0xFF) / 255,
                 green: CGFloat((rgb >> 16) & 0xFF) / 255,
-                blue: CGFloat((rgb >> 8) & 0xFF) / 255,
-                alpha: CGFloat(rgb & 0xFF) / 255
+                blue:  CGFloat((rgb >>  8) & 0xFF) / 255,
+                alpha: CGFloat( rgb        & 0xFF) / 255
             )
         } else {
             self.init(white: 0.5, alpha: 1)

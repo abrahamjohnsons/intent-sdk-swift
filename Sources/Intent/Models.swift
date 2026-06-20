@@ -2,8 +2,8 @@ import Foundation
 
 // MARK: - Subscription Status
 
-/// The user's current subscription state. Set via `ACO.shared.subscriptionStatus`.
-public enum ACOSubscriptionStatus {
+/// The user's current subscription state. Set via `Intent.shared.subscriptionStatus`.
+public enum IntentSubscriptionStatus {
     /// No active subscription.
     case inactive
     /// Active subscription with an optional product identifier.
@@ -21,13 +21,44 @@ public enum ACOSubscriptionStatus {
 
 struct SDKConfig: Codable {
     let projectId: String
-    let flows: [ACOFlow]
+    let flows: [IntentFlow]
+    let campaigns: [IntentCampaign]
     let fetchedAt: String?
+}
+
+// MARK: - Campaign
+
+public struct IntentCampaign: Codable {
+    public let id: String
+    public let name: String
+    public let placements: [String]
+    public let flowId: String?
+    public let audience: CampaignAudience?
+    public let priority: Int
+    public let holdoutPercentage: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, placements, audience, priority
+        case flowId             = "flow_id"
+        case holdoutPercentage  = "holdout_percentage"
+    }
+}
+
+public struct CampaignAudience: Codable {
+    public let logic: String
+    public let rules: [CampaignRule]
+}
+
+public struct CampaignRule: Codable {
+    public let id: String
+    public let attribute: String
+    public let `operator`: String
+    public let value: String
 }
 
 // MARK: - Flow
 
-public struct ACOFlow: Codable {
+public struct IntentFlow: Codable {
     public let id: String
     public let name: String
     public let type: String
@@ -95,6 +126,7 @@ public struct QuizOption: Codable {
 
 public struct FlowTheme: Codable {
     public let background: String?
+    public let backgroundGradient: String?
     public let foreground: String?
     public let primary: String?
     public let primaryForeground: String?
@@ -114,9 +146,12 @@ public struct FlowSettings: Codable {
 
 // MARK: - Event
 
-public struct ACOEvent: Codable {
+public struct IntentEvent: Codable {
     public let eventType: String
     public let eventName: String
+    public var userId: String?
+    public var sessionId: String?
+    public var timestamp: Int64?
     public let flowId: String?
     public let screenId: String?
     public let experimentId: String?
@@ -126,6 +161,9 @@ public struct ACOEvent: Codable {
     public init(
         eventType: String,
         eventName: String,
+        userId: String? = nil,
+        sessionId: String? = nil,
+        timestamp: Int64? = nil,
         flowId: String? = nil,
         screenId: String? = nil,
         experimentId: String? = nil,
@@ -134,6 +172,9 @@ public struct ACOEvent: Codable {
     ) {
         self.eventType = eventType
         self.eventName = eventName
+        self.userId = userId
+        self.sessionId = sessionId
+        self.timestamp = timestamp
         self.flowId = flowId
         self.screenId = screenId
         self.experimentId = experimentId

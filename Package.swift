@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "ACO",
+    name: "Intent",
     platforms: [
         .iOS(.v15),
         .macOS(.v12)
     ],
     products: [
-        .library(name: "ACO", targets: ["ACO"]),
+        .library(name: "Intent", targets: ["Intent"]),
     ],
     targets: [
         .target(
-            name: "ACO",
-            path: "Sources/ACO"
+            name: "Intent",
+            path: "Sources/Intent"
         ),
     ]
 )
