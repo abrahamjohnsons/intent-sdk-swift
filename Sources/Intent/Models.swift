@@ -185,6 +185,43 @@ public struct IntentEvent: Codable {
     }
 }
 
+// MARK: - Acquisition Channel
+
+/// Standard acquisition channels for Intent personalization.
+///
+/// Pass this to `Intent.configure(acquisitionChannel:)` to automatically
+/// serve channel-appropriate copy variants to each user segment.
+///
+/// ```swift
+/// let channel = await Intent.resolveAttribution(...) // returns "paid_social", "organic", etc.
+/// Intent.configure(
+///     projectId: "...",
+///     sdkKey: "...",
+///     acquisitionChannel: IntentAcquisitionChannel(rawValue: channel ?? "organic") ?? .organic
+/// )
+/// ```
+public struct IntentAcquisitionChannel: RawRepresentable, Codable, Equatable {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+
+    /// User came from a paid social ad (TikTok, Meta, Snap, Pinterest).
+    public static let paidSocial   = IntentAcquisitionChannel(rawValue: "paid_social")
+    /// User came from a paid search ad (Google, Apple Search Ads).
+    public static let paidSearch   = IntentAcquisitionChannel(rawValue: "paid_search")
+    /// Any paid channel (shorthand that matches both paidSocial and paidSearch).
+    public static let paid         = IntentAcquisitionChannel(rawValue: "paid")
+    /// User discovered the app organically (App Store search, word of mouth, referral).
+    public static let organic      = IntentAcquisitionChannel(rawValue: "organic")
+    /// User came from an influencer or creator partnership.
+    public static let influencer   = IntentAcquisitionChannel(rawValue: "influencer")
+    /// User came from an email or push notification campaign.
+    public static let email        = IntentAcquisitionChannel(rawValue: "email")
+    /// User came from a referral or sharing link.
+    public static let referral     = IntentAcquisitionChannel(rawValue: "referral")
+    /// Unknown or unattributed source.
+    public static let unknown      = IntentAcquisitionChannel(rawValue: "unknown")
+}
+
 // MARK: - AnyCodable (for dynamic component props)
 
 public struct AnyCodable: Codable {

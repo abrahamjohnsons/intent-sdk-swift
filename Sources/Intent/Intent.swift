@@ -28,10 +28,34 @@ public final class Intent {
     private var userAttributes: [String: Any] = [:]
     private var sessionId = UUID().uuidString
 
+    /// Configure the Intent SDK at app launch.
+    ///
+    /// - Parameters:
+    ///   - projectId: Your Intent project ID.
+    ///   - sdkKey: Your Intent SDK key.
+    ///   - userId: A stable identifier for the current user (default: "anonymous").
+    ///   - acquisitionChannel: How this user was acquired — drives campaign personalization.
+    ///     Paid users get urgency-heavy copy; organic users get value-heavy copy.
+    ///     Use `IntentAcquisitionChannel` constants or pass a raw string.
+    ///     Combine with `Intent.resolveAttribution()` for automatic attribution.
+    ///   - source: Legacy alias for `acquisitionChannel`. Prefer `acquisitionChannel`.
+    ///   - apiBaseURL: Override the Intent API base URL (advanced).
+    ///   - debug: Enable verbose logging.
+    ///
+    /// ```swift
+    /// // Recommended: resolve attribution then configure
+    /// let channel = await Intent.resolveAttribution(projectId: "...", sdkKey: "...")
+    /// Intent.configure(
+    ///     projectId: "YOUR_PROJECT_ID",
+    ///     sdkKey: "YOUR_SDK_KEY",
+    ///     acquisitionChannel: channel ?? IntentAcquisitionChannel.organic.rawValue
+    /// )
+    /// ```
     public static func configure(
         projectId: String,
         sdkKey: String,
         userId: String = "anonymous",
+        acquisitionChannel: String? = nil,
         source: String? = nil,
         apiBaseURL: String = "https://adaptive-conversion-os-ruddy.vercel.app",
         debug: Bool = false
@@ -42,10 +66,30 @@ public final class Intent {
             userId: userId,
             apiBaseURL: apiBaseURL,
             debug: debug,
+            acquisitionChannel: acquisitionChannel,
             source: source
         )
         // Prefetch in background
         Task { await shared.fetchSDKConfig() }
+    }
+
+    /// Convenience overload accepting a typed `IntentAcquisitionChannel`.
+    public static func configure(
+        projectId: String,
+        sdkKey: String,
+        userId: String = "anonymous",
+        acquisitionChannel: IntentAcquisitionChannel,
+        apiBaseURL: String = "https://adaptive-conversion-os-ruddy.vercel.app",
+        debug: Bool = false
+    ) {
+        configure(
+            projectId: projectId,
+            sdkKey: sdkKey,
+            userId: userId,
+            acquisitionChannel: acquisitionChannel.rawValue,
+            apiBaseURL: apiBaseURL,
+            debug: debug
+        )
     }
 
     // MARK: - Attribution
@@ -185,10 +229,17 @@ public final class Intent {
             "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
             "user_id":     config?.userId ?? "",
         ]
-        // Propagate acquisition source so targeting rules on acquisition_channel work
-        if let source = config?.source {
-            ctx["source"] = source
-            ctx["acquisition_channel"] = source
+        // Propagate acquisition channel so campaign audience rules can match on it.
+        // acquisitionChannel takes precedence over the legacy `source` field.
+        if let channel = config?.resolvedChannel {
+            ctx["source"] = channel
+            ctx["acquisition_channel"] = channel
+            // Convenience: "paid_social" and "paid_search" also match the generic "paid" bucket
+            if channel.hasPrefix("paid") {
+                ctx["acquisition_type"] = "paid"
+            } else {
+                ctx["acquisition_type"] = "organic"
+            }
         }
         // Merge typed user attributes
         for (k, v) in userAttributes {
@@ -245,8 +296,9 @@ public final class Intent {
             URLQueryItem(name: "platform", value: "ios"),
             URLQueryItem(name: "appVersion", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"),
         ]
-        if let source = cfg.source {
-            queryItems.append(URLQueryItem(name: "source", value: source))
+        if let channel = cfg.resolvedChannel {
+            queryItems.append(URLQueryItem(name: "source", value: channel))
+            queryItems.append(URLQueryItem(name: "acquisitionChannel", value: channel))
         }
         components.queryItems = queryItems
 
@@ -255,8 +307,9 @@ public final class Intent {
         var request = URLRequest(url: url)
         request.setValue(cfg.sdkKey, forHTTPHeaderField: "x-sdk-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let source = cfg.source {
-            request.setValue(source, forHTTPHeaderField: "x-intent-source")
+        if let channel = cfg.resolvedChannel {
+            request.setValue(channel, forHTTPHeaderField: "x-intent-source")
+            request.setValue(channel, forHTTPHeaderField: "x-intent-acquisition-channel")
         }
         request.timeoutInterval = 10
 
@@ -422,6 +475,7 @@ public final class Intent {
                 userId: userId,
                 apiBaseURL: config.apiBaseURL,
                 debug: config.debug,
+                acquisitionChannel: config.acquisitionChannel,
                 source: config.source
             )
         }
@@ -488,6 +542,7 @@ public final class Intent {
                 userId: "anonymous",
                 apiBaseURL: config.apiBaseURL,
                 debug: config.debug,
+                acquisitionChannel: config.acquisitionChannel,
                 source: config.source
             )
         }
@@ -514,7 +569,13 @@ struct IntentConfig {
     let userId: String
     let apiBaseURL: String
     let debug: Bool
+    /// Preferred acquisition channel (e.g. "paid_social", "organic"). Used for audience rule evaluation.
+    let acquisitionChannel: String?
+    /// Legacy alias — maps to acquisitionChannel if acquisitionChannel is nil.
     let source: String?
+
+    /// The resolved channel string: acquisitionChannel takes precedence over source.
+    var resolvedChannel: String? { acquisitionChannel ?? source }
 }
 
 // MARK: - Flow type enum
