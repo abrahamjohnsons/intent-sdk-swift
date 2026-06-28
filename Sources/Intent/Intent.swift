@@ -32,6 +32,7 @@ public final class Intent {
         projectId: String,
         sdkKey: String,
         userId: String = "anonymous",
+        source: String? = nil,
         apiBaseURL: String = "https://adaptive-conversion-os-ruddy.vercel.app",
         debug: Bool = false
     ) {
@@ -40,10 +41,70 @@ public final class Intent {
             sdkKey: sdkKey,
             userId: userId,
             apiBaseURL: apiBaseURL,
-            debug: debug
+            debug: debug,
+            source: source
         )
         // Prefetch in background
         Task { await shared.fetchSDKConfig() }
+    }
+
+    // MARK: - Attribution
+
+    /// Resolves the acquisition source from an Intent tracking link click.
+    ///
+    /// Call this **before** `configure()` on first launch. It checks whether
+    /// the user clicked an Intent tracking link (e.g. in a TikTok ad) and
+    /// returns the matched source. The result is cached in UserDefaults so
+    /// subsequent launches skip the network call.
+    ///
+    /// Returns nil if no tracking link click was found within the 24h window.
+    /// Treat nil as organic.
+    ///
+    /// ```swift
+    /// let source = await Intent.resolveAttribution(
+    ///     projectId: "YOUR_PROJECT_ID",
+    ///     sdkKey:    "YOUR_SDK_KEY"
+    /// )
+    /// Intent.configure(
+    ///     projectId: "YOUR_PROJECT_ID",
+    ///     sdkKey:    "YOUR_SDK_KEY",
+    ///     source:    source ?? "organic"
+    /// )
+    /// ```
+    public static func resolveAttribution(
+        projectId: String,
+        sdkKey: String,
+        apiBaseURL: String = "https://adaptive-conversion-os-ruddy.vercel.app"
+    ) async -> String? {
+        let cacheKey = "intent_attribution_\(projectId)"
+
+        // Return persisted result from previous launch — avoids double-matching
+        if let cached = UserDefaults.standard.string(forKey: cacheKey) {
+            return cached.isEmpty ? nil : cached
+        }
+
+        guard let url = URL(string: "\(apiBaseURL)/api/sdk/\(projectId)/attribution") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue(sdkKey, forHTTPHeaderField: "x-sdk-key")
+        request.timeoutInterval = 5
+
+        struct AttributionResponse: Decodable { let source: String? }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                return nil
+            }
+            let decoded = try JSONDecoder().decode(AttributionResponse.self, from: data)
+            // Persist: empty string means "checked but no match", non-empty is the source
+            UserDefaults.standard.set(decoded.source ?? "", forKey: cacheKey)
+            return decoded.source
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Flow access
@@ -124,6 +185,11 @@ public final class Intent {
             "app_version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "",
             "user_id":     config?.userId ?? "",
         ]
+        // Propagate acquisition source so targeting rules on acquisition_channel work
+        if let source = config?.source {
+            ctx["source"] = source
+            ctx["acquisition_channel"] = source
+        }
         // Merge typed user attributes
         for (k, v) in userAttributes {
             ctx[k] = "\(v)"
@@ -174,17 +240,24 @@ public final class Intent {
         if let cached = cachedConfig { return cached }
 
         var components = URLComponents(string: "\(cfg.apiBaseURL)/api/sdk/\(cfg.projectId)")!
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "userId", value: cfg.userId),
             URLQueryItem(name: "platform", value: "ios"),
             URLQueryItem(name: "appVersion", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"),
         ]
+        if let source = cfg.source {
+            queryItems.append(URLQueryItem(name: "source", value: source))
+        }
+        components.queryItems = queryItems
 
         guard let url = components.url else { return nil }
 
         var request = URLRequest(url: url)
         request.setValue(cfg.sdkKey, forHTTPHeaderField: "x-sdk-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let source = cfg.source {
+            request.setValue(source, forHTTPHeaderField: "x-intent-source")
+        }
         request.timeoutInterval = 10
 
         do {
@@ -348,7 +421,8 @@ public final class Intent {
                 sdkKey: config.sdkKey,
                 userId: userId,
                 apiBaseURL: config.apiBaseURL,
-                debug: config.debug
+                debug: config.debug,
+                source: config.source
             )
         }
         shared.userAttributes.merge(attributes) { _, new in new }
@@ -413,7 +487,8 @@ public final class Intent {
                 sdkKey: config.sdkKey,
                 userId: "anonymous",
                 apiBaseURL: config.apiBaseURL,
-                debug: config.debug
+                debug: config.debug,
+                source: config.source
             )
         }
         shared.userAttributes = [:]
@@ -439,6 +514,7 @@ struct IntentConfig {
     let userId: String
     let apiBaseURL: String
     let debug: Bool
+    let source: String?
 }
 
 // MARK: - Flow type enum
