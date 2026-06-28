@@ -24,6 +24,7 @@ public final class IntentFlowViewController: UIViewController {
 
     private var screenIndex = 0
     private var quizAnswers: [String: Any] = [:]
+    private var collectedData: [String: Any] = [:]
     private var theme: ResolvedTheme
 
     private var screens: [FlowScreen] { flow.schema.screens }
@@ -43,6 +44,9 @@ public final class IntentFlowViewController: UIViewController {
     private let skipButton = UIButton(type: .system)
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
+    private let heroContainerView = UIView()
+    private var heroHeightConstraint: NSLayoutConstraint?
+    private var backgroundGradientLayer: CAGradientLayer?
 
     // MARK: - Init
 
@@ -71,6 +75,11 @@ public final class IntentFlowViewController: UIViewController {
         renderCurrentScreen()
     }
 
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyGradientBackground()
+    }
+
     // MARK: - Layout
 
     private func setupLayout() {
@@ -96,6 +105,10 @@ public final class IntentFlowViewController: UIViewController {
         scrollView.alwaysBounceVertical = true
         view.addSubview(scrollView)
 
+        heroContainerView.translatesAutoresizingMaskIntoConstraints = false
+        heroContainerView.clipsToBounds = true
+        scrollView.addSubview(heroContainerView)
+
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
         contentStack.spacing = 20
@@ -103,6 +116,9 @@ public final class IntentFlowViewController: UIViewController {
         scrollView.addSubview(contentStack)
 
         let safe = view.safeAreaLayoutGuide
+        let hc = heroContainerView.heightAnchor.constraint(equalToConstant: 0)
+        heroHeightConstraint = hc
+
         NSLayoutConstraint.activate([
             progressView.topAnchor.constraint(equalTo: safe.topAnchor, constant: 16),
             progressView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 24),
@@ -118,7 +134,13 @@ public final class IntentFlowViewController: UIViewController {
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            contentStack.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            heroContainerView.topAnchor.constraint(equalTo: scrollView.topAnchor),
+            heroContainerView.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+            heroContainerView.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+            heroContainerView.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+            hc,
+
+            contentStack.topAnchor.constraint(equalTo: heroContainerView.bottomAnchor),
             contentStack.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor, constant: 24),
             contentStack.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor, constant: -24),
             contentStack.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: -40),
@@ -126,12 +148,41 @@ public final class IntentFlowViewController: UIViewController {
         ])
     }
 
+    // MARK: - Gradient background
+
+    private func applyGradientBackground() {
+        guard let gradientCSS = flow.schema.theme?.backgroundGradient,
+              let colors = parseGradientColors(from: gradientCSS),
+              colors.count >= 2 else { return }
+
+        if backgroundGradientLayer == nil {
+            let gradLayer = CAGradientLayer()
+            gradLayer.startPoint = CGPoint(x: 0, y: 0)
+            gradLayer.endPoint = CGPoint(x: 1, y: 1)
+            view.layer.insertSublayer(gradLayer, at: 0)
+            backgroundGradientLayer = gradLayer
+        }
+        backgroundGradientLayer?.frame = view.bounds
+        backgroundGradientLayer?.colors = colors.map { $0.cgColor }
+    }
+
+    private func parseGradientColors(from css: String) -> [UIColor]? {
+        let pattern = "#[0-9A-Fa-f]{6,8}"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(css.startIndex..., in: css)
+        let matches = regex.matches(in: css, range: range)
+        let colors = matches.compactMap { match -> UIColor? in
+            guard let r = Range(match.range, in: css) else { return nil }
+            return UIColor(hex: String(css[r]))
+        }
+        return colors.isEmpty ? nil : colors
+    }
+
     // MARK: - Screen rendering
 
     private func renderCurrentScreen() {
         guard let screen = currentScreen else { return }
 
-        // Update progress
         if flow.schema.settings?.showProgress != false {
             let progress = Float(screenIndex + 1) / Float(max(screens.count, 1))
             progressView.setProgress(progress, animated: screenIndex > 0)
@@ -139,7 +190,6 @@ public final class IntentFlowViewController: UIViewController {
 
         Intent.shared.trackScreenView(screenId: screen.id, flowId: flow.id)
 
-        // Reset paywall state for every screen transition
         isPaywallScreen = screen.type == "paywall" || screen.type == "paywall_soft"
         paywallOptions = []
         paywallCards = []
@@ -147,7 +197,6 @@ public final class IntentFlowViewController: UIViewController {
         paywallProductLoadTask?.cancel()
         paywallProductLoadTask = nil
 
-        // Loading screens auto-advance
         if screen.type == "loading" {
             renderLoadingScreen(screen)
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -156,15 +205,37 @@ public final class IntentFlowViewController: UIViewController {
             return
         }
 
+        // Layout-aware hero handling
+        let layout = screen.layout ?? "default"
+        let isFullBleed = layout == "full_bleed_hero"
+
+        heroContainerView.subviews.forEach { $0.removeFromSuperview() }
+
+        if isFullBleed, let heroComp = screen.components.first(where: { $0.type == "hero_image" }) {
+            heroHeightConstraint?.constant = 280
+            let hv = makeHeroView(component: heroComp)
+            hv.translatesAutoresizingMaskIntoConstraints = false
+            heroContainerView.addSubview(hv)
+            NSLayoutConstraint.activate([
+                hv.topAnchor.constraint(equalTo: heroContainerView.topAnchor),
+                hv.leadingAnchor.constraint(equalTo: heroContainerView.leadingAnchor),
+                hv.trailingAnchor.constraint(equalTo: heroContainerView.trailingAnchor),
+                hv.bottomAnchor.constraint(equalTo: heroContainerView.bottomAnchor),
+            ])
+        } else {
+            heroHeightConstraint?.constant = 0
+        }
+
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         for component in screen.components {
+            // Skip hero_image in content stack when it's already shown full-bleed above
+            if isFullBleed && component.type == "hero_image" { continue }
             if let view = makeComponentView(component: component, screen: screen) {
                 contentStack.addArrangedSubview(view)
             }
         }
 
-        // After building paywall UI: select default plan, load real prices, inject restore button
         if isPaywallScreen && !paywallOptions.isEmpty {
             let defaultIdx = paywallOptions.firstIndex(where: { $0.highlighted }) ?? 0
             selectPaywallOption(at: defaultIdx)
@@ -174,6 +245,8 @@ public final class IntentFlowViewController: UIViewController {
     }
 
     private func renderLoadingScreen(_ screen: FlowScreen) {
+        heroHeightConstraint?.constant = 0
+        heroContainerView.subviews.forEach { $0.removeFromSuperview() }
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let container = UIView()
@@ -203,11 +276,21 @@ public final class IntentFlowViewController: UIViewController {
 
         switch component.type {
 
+        // ── Hero ──────────────────────────────────────────────────────────────
+
+        case "hero_image":
+            return makeHeroView(component: component)
+
         // ── Text ──────────────────────────────────────────────────────────────
 
         case "heading":
+            let text = props["text"]?.stringValue ?? ""
+            let accentWord = props["accentWord"]?.stringValue
+            if let accent = accentWord, !accent.isEmpty, text.contains(accent) {
+                return makeAttributedHeading(text: text, accentWord: accent)
+            }
             return makeLabel(
-                text: props["text"]?.stringValue ?? "",
+                text: text,
                 font: .systemFont(ofSize: 28, weight: .bold),
                 color: theme.foreground,
                 lines: 0
@@ -231,6 +314,15 @@ public final class IntentFlowViewController: UIViewController {
 
         case "badge", "label":
             return makeBadge(text: props["text"]?.stringValue ?? "")
+
+        // ── Input ─────────────────────────────────────────────────────────────
+
+        case "text_input":
+            let placeholder = props["placeholder"]?.stringValue ?? ""
+            let collects = props["collects"]?.stringValue ?? props["name"]?.stringValue ?? "input"
+            let fieldLabel = props["label"]?.stringValue
+            let keyboard = props["keyboard"]?.stringValue
+            return makeTextInputField(placeholder: placeholder, collects: collects, fieldLabel: fieldLabel, keyboard: keyboard)
 
         // ── Buttons ───────────────────────────────────────────────────────────
 
@@ -258,7 +350,9 @@ public final class IntentFlowViewController: UIViewController {
                     )
                 }
             }
-            return makeOptionsStack(quizKey: quizKey, options: options, multiSelect: multiSelect)
+            let autoAdvance = props["autoAdvance"]?.boolValue ?? (!multiSelect)
+            let collectsKey = props["collects"]?.stringValue
+            return makeOptionsStack(quizKey: quizKey, options: options, multiSelect: multiSelect, autoAdvance: autoAdvance, collectsKey: collectsKey)
 
         // ── Lists ─────────────────────────────────────────────────────────────
 
@@ -294,9 +388,6 @@ public final class IntentFlowViewController: UIViewController {
         // ── Pricing ───────────────────────────────────────────────────────────
 
         case "pricing", "price_card", "pricing_option":
-            // "options" key (price_card / pricing_option components)
-            // "plans" key (paywall / pricing components — older builder format)
-            // SDK handles both; maps "plans" fields to the unified option format.
             var rawOptions = props["options"]?.arrayValue as? [[String: Any]] ?? []
             if rawOptions.isEmpty, let rawPlans = props["plans"]?.arrayValue as? [[String: Any]] {
                 rawOptions = rawPlans.map { p in
@@ -334,6 +425,129 @@ public final class IntentFlowViewController: UIViewController {
         label.textColor = color
         label.numberOfLines = lines
         return label
+    }
+
+    private func makeAttributedHeading(text: String, accentWord: String) -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = 0
+        let attributed = NSMutableAttributedString(
+            string: text,
+            attributes: [
+                .font: UIFont.systemFont(ofSize: 28, weight: .bold),
+                .foregroundColor: theme.foreground
+            ]
+        )
+        var searchRange = text.startIndex..<text.endIndex
+        while let range = text.range(of: accentWord, options: .caseInsensitive, range: searchRange) {
+            attributed.addAttribute(.foregroundColor, value: theme.primary, range: NSRange(range, in: text))
+            searchRange = range.upperBound..<text.endIndex
+        }
+        label.attributedText = attributed
+        return label
+    }
+
+    private func makeHeroView(component: FlowComponent) -> UIView {
+        let props = component.props
+        let emoji = props["emoji"]?.stringValue ?? props["icon"]?.stringValue ?? "✨"
+        let glowColor: UIColor
+        if let hex = props["glowColor"]?.stringValue {
+            glowColor = UIColor(hex: hex)
+        } else {
+            glowColor = theme.primary
+        }
+
+        let container = UIView()
+        container.backgroundColor = .clear
+
+        let glowView = RadialGlowView(color: glowColor)
+        glowView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(glowView)
+
+        let emojiLabel = UILabel()
+        emojiLabel.text = emoji
+        emojiLabel.font = .systemFont(ofSize: 88)
+        emojiLabel.textAlignment = .center
+        emojiLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(emojiLabel)
+
+        NSLayoutConstraint.activate([
+            glowView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            glowView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            glowView.widthAnchor.constraint(equalToConstant: 220),
+            glowView.heightAnchor.constraint(equalToConstant: 220),
+            emojiLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            emojiLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+
+        return container
+    }
+
+    private func makeTextInputField(placeholder: String, collects: String, fieldLabel: String?, keyboard: String?) -> UIView {
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.spacing = 8
+
+        if let lbl = fieldLabel, !lbl.isEmpty {
+            let label = UILabel()
+            label.text = lbl
+            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.textColor = theme.foreground.withAlphaComponent(0.6)
+            stack.addArrangedSubview(label)
+        }
+
+        let field = UITextField()
+        field.placeholder = placeholder
+        field.font = .systemFont(ofSize: 16)
+        field.textColor = theme.foreground
+        field.backgroundColor = theme.secondary
+        field.layer.cornerRadius = theme.radius
+        field.layer.borderWidth = 1
+        field.layer.borderColor = theme.foreground.withAlphaComponent(0.15).cgColor
+        field.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 0))
+        field.leftViewMode = .always
+        field.rightView = UIView(frame: CGRect(x: 0, y: 0, width: 16, height: 0))
+        field.rightViewMode = .always
+        field.heightAnchor.constraint(equalToConstant: 52).isActive = true
+        field.accessibilityIdentifier = collects
+
+        switch keyboard {
+        case "email":
+            field.keyboardType = .emailAddress
+            field.autocapitalizationType = .none
+            field.autocorrectionType = .no
+        case "phone":
+            field.keyboardType = .phonePad
+        case "number":
+            field.keyboardType = .numberPad
+        default:
+            field.keyboardType = .default
+        }
+
+        field.addTarget(self, action: #selector(textFieldChanged(_:)), for: .editingChanged)
+        field.addTarget(self, action: #selector(textFieldFocused(_:)), for: .editingDidBegin)
+        field.addTarget(self, action: #selector(textFieldBlurred(_:)), for: .editingDidEnd)
+
+        stack.addArrangedSubview(field)
+        return stack
+    }
+
+    @objc private func textFieldChanged(_ sender: UITextField) {
+        guard let key = sender.accessibilityIdentifier else { return }
+        collectedData[key] = sender.text ?? ""
+    }
+
+    @objc private func textFieldFocused(_ sender: UITextField) {
+        UIView.animate(withDuration: 0.15) {
+            sender.layer.borderColor = self.theme.primary.cgColor
+            sender.layer.borderWidth = 2
+        }
+    }
+
+    @objc private func textFieldBlurred(_ sender: UITextField) {
+        UIView.animate(withDuration: 0.15) {
+            sender.layer.borderColor = self.theme.foreground.withAlphaComponent(0.15).cgColor
+            sender.layer.borderWidth = 1
+        }
     }
 
     private func makeBadge(text: String) -> UIView {
@@ -374,7 +588,6 @@ public final class IntentFlowViewController: UIViewController {
         btn.layer.cornerRadius = theme.radius
         btn.heightAnchor.constraint(equalToConstant: 54).isActive = true
 
-        // Paywall screens purchase instead of advance
         if isPaywallScreen {
             btn.addTarget(self, action: #selector(handlePaywallPurchaseTap), for: .touchUpInside)
         } else {
@@ -397,7 +610,7 @@ public final class IntentFlowViewController: UIViewController {
         return btn
     }
 
-    private func makeOptionsStack(quizKey: String, options: [QuizOption], multiSelect: Bool) -> UIView {
+    private func makeOptionsStack(quizKey: String, options: [QuizOption], multiSelect: Bool, autoAdvance: Bool, collectsKey: String?) -> UIView {
         let stack = UIStackView()
         stack.axis = .vertical
         stack.spacing = 10
@@ -422,13 +635,21 @@ public final class IntentFlowViewController: UIViewController {
                             current.append(option.value)
                         }
                         self.quizAnswers[quizKey] = current
+                        if let key = collectsKey {
+                            self.collectedData[key] = current
+                        }
                         optView.updateSelection(
                             (self.quizAnswers[quizKey] as? [String] ?? []).contains(option.value)
                         )
                     } else {
                         self.quizAnswers[quizKey] = option.value
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
-                            self.goNext()
+                        if let key = collectsKey {
+                            self.collectedData[key] = option.value
+                        }
+                        if autoAdvance {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                                self.goNext()
+                            }
                         }
                     }
                 }
@@ -552,14 +773,11 @@ public final class IntentFlowViewController: UIViewController {
 
     // MARK: - Pricing stack (paywall)
 
-    /// Builds the pricing cards. For paywall screens, cards are tappable (select plan)
-    /// and prices update to real App Store values after `loadPaywallProducts()` completes.
     private func makePricingStack(options: [[String: Any]]) -> UIView {
         let stack = UIStackView()
         stack.axis = .vertical
         stack.spacing = 12
 
-        // Reset paywall card tracking
         paywallCards = []
         paywallOptions = []
 
@@ -588,7 +806,6 @@ public final class IntentFlowViewController: UIViewController {
         return stack
     }
 
-    /// Non-paywall static pricing card (read-only, used on value_prop screens etc.)
     private func makeStaticPricingCard(option: [String: Any]) -> UIView {
         let highlighted = option["highlighted"] as? Bool ?? false
         let card = UIView()
@@ -686,17 +903,14 @@ public final class IntentFlowViewController: UIViewController {
             guard let products = try? await IntentPurchaseManager.shared.loadProducts(ids: ids) else { return }
             guard !Task.isCancelled else { return }
 
-            // Update each card with real App Store price in the user's locale
             for (index, option) in self.paywallOptions.enumerated() {
                 guard index < self.paywallCards.count else { break }
                 guard let productId = option.productId,
                       let product = products.first(where: { $0.id == productId }) else { continue }
 
-                // Build per-period breakdown for subscriptions
                 var perMonth: String? = nil
                 if #available(iOS 15, *), let sub = product.subscription {
                     let period = sub.subscriptionPeriod
-                    // e.g. annual plan → "£X.XX / month"
                     if period.unit == .year && period.value == 1 {
                         let monthly = NSDecimalNumber(decimal: product.price)
                             .dividing(by: 12, withBehavior: NSDecimalNumberHandler(
@@ -707,7 +921,6 @@ public final class IntentFlowViewController: UIViewController {
                         perMonth = "\(product.priceFormatStyle.format(monthly.decimalValue)) / month"
                     }
 
-                    // Show free trial info if available
                     if let offer = sub.introductoryOffer, offer.paymentMode == .freeTrial {
                         let p = offer.period
                         let unitStr: String
@@ -729,8 +942,6 @@ public final class IntentFlowViewController: UIViewController {
 
     // MARK: - Paywall: restore purchases button
 
-    /// Injects a centred "Restore Purchases" link below all other content on paywall screens.
-    /// Required by App Store guideline 3.1.1 — apps must provide a restore mechanism.
     private func injectRestoreButton() {
         let btn = UIButton(type: .system)
         btn.setTitle("Restore Purchases", for: .normal)
@@ -767,7 +978,6 @@ public final class IntentFlowViewController: UIViewController {
         guard index < paywallOptions.count else { goNext(); return }
         let option = paywallOptions[index]
 
-        // No StoreKit product ID — treat as a soft paywall, advance normally
         guard let productId = option.productId else {
             goNext()
             return
@@ -782,19 +992,16 @@ public final class IntentFlowViewController: UIViewController {
     private func executePurchase(productId: String, cardIndex: Int) async {
         guard #available(iOS 15, *) else { goNext(); return }
 
-        // Track intent
         Intent.shared.trackPurchaseStarted(
             flowId: flow.id,
             screenId: currentScreen?.id,
             properties: ["product_id": AnyCodable(productId)]
         )
 
-        // Show loading on the selected card
         if cardIndex < paywallCards.count {
             paywallCards[cardIndex].setLoading(true)
         }
 
-        // Fetch the product (may already be cached by the OS)
         guard let products = try? await IntentPurchaseManager.shared.loadProducts(ids: [productId]),
               let product = products.first else {
             if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
@@ -816,7 +1023,7 @@ public final class IntentFlowViewController: UIViewController {
                 goNext()
 
             case .cancelled:
-                break  // Stay on paywall — user can try again
+                break
 
             case .pending:
                 showAlert(
@@ -865,11 +1072,10 @@ public final class IntentFlowViewController: UIViewController {
 
 // MARK: - PaywallOption
 
-/// Data model for a single pricing option on a paywall screen.
 private struct PaywallOption {
     let label: String
-    let productId: String?         // App Store product identifier — nil = no StoreKit purchase
-    let fallbackPrice: String      // Shown while StoreKit loads or if no productId
+    let productId: String?
+    let fallbackPrice: String
     let fallbackPerMonth: String?
     let badge: String?
     let highlighted: Bool
@@ -877,10 +1083,6 @@ private struct PaywallOption {
 
 // MARK: - PricingCardView
 
-/// Selectable pricing card for paywall screens. Supports:
-///   - Selected state with animated border/background
-///   - Real-price update after StoreKit loads
-///   - Loading indicator during purchase
 private final class PricingCardView: UIView {
 
     private let option: PaywallOption
@@ -922,25 +1124,21 @@ private final class PricingCardView: UIView {
             inner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
         ])
 
-        // Badge
         if let badge = option.badge {
             inner.addArrangedSubview(makeBadge(text: badge))
         }
 
-        // Plan label
         let planLabel = UILabel()
         planLabel.text = option.label
         planLabel.font = .systemFont(ofSize: 14, weight: .medium)
         planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
         inner.addArrangedSubview(planLabel)
 
-        // Price
         priceLabel.text = option.fallbackPrice
         priceLabel.font = .systemFont(ofSize: 22, weight: .black)
         priceLabel.textColor = option.highlighted ? theme.primary : theme.foreground
         inner.addArrangedSubview(priceLabel)
 
-        // Per-month breakdown (e.g. "£2.50 / week")
         if let pm = option.fallbackPerMonth, !pm.isEmpty {
             perMonthLabel.text = pm
             perMonthLabel.font = .systemFont(ofSize: 13)
@@ -948,7 +1146,6 @@ private final class PricingCardView: UIView {
             inner.addArrangedSubview(perMonthLabel)
         }
 
-        // Loading spinner (top-right, hidden until purchase starts)
         loadingIndicator.color = theme.primary
         loadingIndicator.hidesWhenStopped = true
         loadingIndicator.translatesAutoresizingMaskIntoConstraints = false
@@ -986,9 +1183,6 @@ private final class PricingCardView: UIView {
         return wrapper
     }
 
-    // MARK: - Public interface
-
-    /// Update the displayed price with a real App Store localized price string.
     func updatePrice(_ price: String, perMonth: String?) {
         priceLabel.text = price
         if let pm = perMonth, !pm.isEmpty {
@@ -1019,13 +1213,13 @@ private final class PricingCardView: UIView {
             : option.highlighted
             ? theme.primary.withAlphaComponent(0.4).cgColor
             : theme.foreground.withAlphaComponent(0.12).cgColor
-        _ = selectedOrHighlighted  // suppress unused warning
+        _ = selectedOrHighlighted
     }
 
     @objc private func tapped() { onTap() }
 }
 
-// MARK: - Option card view (quiz)
+// MARK: - OptionCardView
 
 private final class OptionCardView: UIView {
     private let option: QuizOption
@@ -1087,7 +1281,7 @@ private final class OptionCardView: UIView {
         }
 
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(UIView()) // spacer
+        row.addArrangedSubview(UIView())
 
         checkView.backgroundColor = theme.primary
         checkView.layer.cornerRadius = 11
@@ -1133,10 +1327,44 @@ private final class OptionCardView: UIView {
     @objc private func tapped() { onTap() }
 }
 
+// MARK: - RadialGlowView
+
+private final class RadialGlowView: UIView {
+    private let color: UIColor
+    private var glowLayer: CAGradientLayer?
+
+    init(color: UIColor) {
+        self.color = color
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if glowLayer == nil {
+            let layer = CAGradientLayer()
+            layer.type = .radial
+            layer.colors = [
+                color.withAlphaComponent(0.4).cgColor,
+                color.withAlphaComponent(0).cgColor,
+            ]
+            layer.startPoint = CGPoint(x: 0.5, y: 0.5)
+            layer.endPoint = CGPoint(x: 1.0, y: 1.0)
+            self.layer.addSublayer(layer)
+            glowLayer = layer
+        }
+        glowLayer?.frame = bounds
+    }
+}
+
 // MARK: - ResolvedTheme
 
 struct ResolvedTheme {
     let background: UIColor
+    let backgroundGradient: String?
     let foreground: UIColor
     let primary: UIColor
     let primaryForeground: UIColor
@@ -1145,6 +1373,7 @@ struct ResolvedTheme {
 
     init(from theme: FlowTheme?) {
         background = UIColor(hex: theme?.background ?? "#0a0a0a")
+        backgroundGradient = theme?.backgroundGradient
         foreground = UIColor(hex: theme?.foreground ?? "#f5f5f5")
         primary = UIColor(hex: theme?.primary ?? "#7c3aed")
         primaryForeground = UIColor(hex: theme?.primaryForeground ?? "#ffffff")

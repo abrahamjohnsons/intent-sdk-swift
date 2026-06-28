@@ -5,7 +5,6 @@ let package = Package(
     name: "Intent",
     platforms: [
         .iOS(.v15),
-        .macOS(.v12)
     ],
     products: [
         .library(name: "Intent", targets: ["Intent"]),

@@ -84,6 +84,7 @@ public struct FlowScreen: Codable {
     public let id: String
     public let type: String
     public let name: String
+    public let layout: String?
     public let components: [FlowComponent]
     public let actions: [FlowAction]?
     public let metadata: ScreenMetadata?
