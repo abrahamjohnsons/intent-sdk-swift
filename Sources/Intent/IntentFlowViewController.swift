@@ -491,9 +491,9 @@ public final class IntentFlowViewController: UIViewController {
         let emoji = props["emoji"]?.stringValue ?? props["icon"]?.stringValue ?? "✨"
         let glowColor: UIColor = props["glowColor"]?.stringValue.map { UIColor(hex: $0) } ?? theme.primary
 
-        // If lottieUrl provided on hero_image, use Lottie instead
-        if let lottieUrl = props["lottieUrl"]?.stringValue ?? props["lottie_url"]?.stringValue,
-           let url = URL(string: lottieUrl) {
+        // If lottieUrl provided on hero_image, use Lottie instead (supports named animations)
+        if let rawLottieUrl = props["lottieUrl"]?.stringValue ?? props["lottie_url"]?.stringValue,
+           let url = IntentLottieRegistry.resolve(rawLottieUrl) {
             return makeLottieViewFromURL(url: url, loop: true)
         }
 
@@ -524,11 +524,10 @@ public final class IntentFlowViewController: UIViewController {
 
     private func makeLottieView(component: FlowComponent) -> UIView {
         let props = component.props
-        let urlString = props["url"]?.stringValue ?? props["src"]?.stringValue ?? ""
+        let rawUrlString = props["url"]?.stringValue ?? props["src"]?.stringValue ?? ""
         let loop = props["loop"]?.boolValue ?? true
         let height = props["height"]?.doubleValue.map { CGFloat($0) } ?? 240
-        guard let url = URL(string: urlString) else {
-            // Fallback: empty container with fixed height
+        guard let url = IntentLottieRegistry.resolve(rawUrlString) else {
             let v = UIView()
             v.heightAnchor.constraint(equalToConstant: height).isActive = true
             return v
