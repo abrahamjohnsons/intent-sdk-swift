@@ -72,9 +72,14 @@ public final class IntentFlowViewController: UIViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         setupLayout()
+        setupKeyboardAvoidance()
         Intent.shared.trackFlowStart(flowId: flow.id)
         Intent.shared.trackFlowPresented(flowId: flow.id)
         renderCurrentScreen()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     public override func viewDidLayoutSubviews() {
@@ -710,6 +715,7 @@ public final class IntentFlowViewController: UIViewController {
                 },
                 onTap: { [weak self] in
                     guard let self else { return }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     if multiSelect {
                         var current = self.quizAnswers[quizKey] as? [String] ?? []
                         if current.contains(option.value) { current.removeAll { $0 == option.value } }
@@ -779,6 +785,7 @@ public final class IntentFlowViewController: UIViewController {
     }
 
     private func handleOptionTap(quizKey: String, option: QuizOption, multiSelect: Bool, autoAdvance: Bool, collectsKey: String?) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         if multiSelect {
             var current = quizAnswers[quizKey] as? [String] ?? []
             if current.contains(option.value) { current.removeAll { $0 == option.value } }
@@ -1139,9 +1146,60 @@ public final class IntentFlowViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    // MARK: - Keyboard avoidance
+
+    private func setupKeyboardAvoidance() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillShow(_:)),
+            name: UIResponder.keyboardWillShowNotification, object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardWillHide(_:)),
+            name: UIResponder.keyboardWillHideNotification, object: nil
+        )
+    }
+
+    @objc private func keyboardWillShow(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let frame = (info[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+              let duration = info[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double else { return }
+        let inset = max(0, frame.height - view.safeAreaInsets.bottom)
+        UIView.animate(withDuration: duration) {
+            self.scrollView.contentInset.bottom = inset + 16
+            self.scrollView.verticalScrollIndicatorInsets.bottom = inset + 16
+        }
+        // Scroll active text field into view
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self else { return }
+            if let active = self.findFirstResponder(in: self.scrollView) {
+                let rect = active.convert(active.bounds, to: self.scrollView)
+                self.scrollView.scrollRectToVisible(rect.insetBy(dx: 0, dy: -24), animated: true)
+            }
+        }
+    }
+
+    @objc private func keyboardWillHide(_ notification: Notification) {
+        UIView.animate(withDuration: 0.25) {
+            self.scrollView.contentInset.bottom = 0
+            self.scrollView.verticalScrollIndicatorInsets.bottom = 0
+        }
+    }
+
+    private func findFirstResponder(in view: UIView) -> UIView? {
+        if view.isFirstResponder { return view }
+        for sub in view.subviews {
+            if let found = findFirstResponder(in: sub) { return found }
+        }
+        return nil
+    }
+
     // MARK: - Navigation
 
-    @objc private func didTapNext() { goNext() }
+    @objc private func didTapNext() {
+        let impact = UIImpactFeedbackGenerator(style: .medium)
+        impact.impactOccurred()
+        goNext()
+    }
 
     @objc private func didTapSkip() {
         let behavior = flow.schema.settings?.exitBehavior ?? "dismiss"
