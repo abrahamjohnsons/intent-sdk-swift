@@ -9,9 +9,15 @@ let package = Package(
     products: [
         .library(name: "Intent", targets: ["Intent"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/airbnb/lottie-spm.git", from: "4.4.0"),
+    ],
     targets: [
         .target(
             name: "Intent",
+            dependencies: [
+                .product(name: "Lottie", package: "lottie-spm"),
+            ],
             path: "Sources/Intent"
         ),
     ]

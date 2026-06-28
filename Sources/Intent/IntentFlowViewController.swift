@@ -1,4 +1,5 @@
 import UIKit
+import Lottie
 import StoreKit
 
 /// Renders an Intent flow schema as a native UIKit view controller.
@@ -25,6 +26,7 @@ public final class IntentFlowViewController: UIViewController {
     private var screenIndex = 0
     private var quizAnswers: [String: Any] = [:]
     private var collectedData: [String: Any] = [:]
+    private var currentScreenLayout: String = "default"
     private var theme: ResolvedTheme
 
     private var screens: [FlowScreen] { flow.schema.screens }
@@ -95,7 +97,7 @@ public final class IntentFlowViewController: UIViewController {
         skipButton.translatesAutoresizingMaskIntoConstraints = false
         skipButton.setTitle("Skip", for: .normal)
         skipButton.setTitleColor(theme.foreground.withAlphaComponent(0.5), for: .normal)
-        skipButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .medium)
+        skipButton.titleLabel?.font = theme.font(size: 14, weight: .medium)
         skipButton.addTarget(self, action: #selector(didTapSkip), for: .touchUpInside)
         skipButton.isHidden = !(flow.schema.settings?.canSkip ?? false)
         view.addSubview(skipButton)
@@ -205,15 +207,18 @@ public final class IntentFlowViewController: UIViewController {
             return
         }
 
-        // Layout-aware hero handling
-        let layout = screen.layout ?? "default"
+        currentScreenLayout = screen.layout ?? "default"
+        let layout = currentScreenLayout
         let isFullBleed = layout == "full_bleed_hero"
+        let isCenterHero = layout == "center_hero"
+        let isCardStack = layout == "card_stack"
 
+        // Hero container
         heroContainerView.subviews.forEach { $0.removeFromSuperview() }
 
-        if isFullBleed, let heroComp = screen.components.first(where: { $0.type == "hero_image" }) {
+        if isFullBleed, let heroComp = screen.components.first(where: { $0.type == "hero_image" || $0.type == "lottie_animation" }) {
             heroHeightConstraint?.constant = 280
-            let hv = makeHeroView(component: heroComp)
+            let hv = heroComp.type == "lottie_animation" ? makeLottieView(component: heroComp) : makeHeroView(component: heroComp)
             hv.translatesAutoresizingMaskIntoConstraints = false
             heroContainerView.addSubview(hv)
             NSLayoutConstraint.activate([
@@ -226,13 +231,19 @@ public final class IntentFlowViewController: UIViewController {
             heroHeightConstraint?.constant = 0
         }
 
+        // Content stack alignment
+        contentStack.alignment = isCenterHero ? .center : .fill
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         for component in screen.components {
-            // Skip hero_image in content stack when it's already shown full-bleed above
-            if isFullBleed && component.type == "hero_image" { continue }
-            if let view = makeComponentView(component: component, screen: screen) {
-                contentStack.addArrangedSubview(view)
+            if isFullBleed && (component.type == "hero_image" || component.type == "lottie_animation") { continue }
+            guard let componentView = makeComponentView(component: component, screen: screen) else { continue }
+
+            // card_stack wraps non-action components in elevated cards
+            if isCardStack && !["button", "secondary_button", "spacer", "divider", "separator", "guarantee", "guarantee_badge"].contains(component.type) {
+                contentStack.addArrangedSubview(wrapInCard(componentView))
+            } else {
+                contentStack.addArrangedSubview(componentView)
             }
         }
 
@@ -245,8 +256,10 @@ public final class IntentFlowViewController: UIViewController {
     }
 
     private func renderLoadingScreen(_ screen: FlowScreen) {
+        currentScreenLayout = "default"
         heroHeightConstraint?.constant = 0
         heroContainerView.subviews.forEach { $0.removeFromSuperview() }
+        contentStack.alignment = .fill
         contentStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
 
         let container = UIView()
@@ -269,6 +282,28 @@ public final class IntentFlowViewController: UIViewController {
         }
     }
 
+    // MARK: - card_stack card wrapper
+
+    private func wrapInCard(_ content: UIView) -> UIView {
+        let card = UIView()
+        card.backgroundColor = theme.secondary
+        card.layer.cornerRadius = theme.radius
+        card.layer.shadowColor = UIColor.black.cgColor
+        card.layer.shadowOpacity = 0.18
+        card.layer.shadowOffset = CGSize(width: 0, height: 4)
+        card.layer.shadowRadius = 12
+
+        content.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: card.topAnchor, constant: 20),
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -20),
+            content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -20),
+        ])
+        return card
+    }
+
     // MARK: - Component factory
 
     private func makeComponentView(component: FlowComponent, screen: FlowScreen) -> UIView? {
@@ -276,10 +311,13 @@ public final class IntentFlowViewController: UIViewController {
 
         switch component.type {
 
-        // ── Hero ──────────────────────────────────────────────────────────────
+        // ── Hero / Media ──────────────────────────────────────────────────────
 
         case "hero_image":
             return makeHeroView(component: component)
+
+        case "lottie_animation":
+            return makeLottieView(component: component)
 
         // ── Text ──────────────────────────────────────────────────────────────
 
@@ -289,28 +327,13 @@ public final class IntentFlowViewController: UIViewController {
             if let accent = accentWord, !accent.isEmpty, text.contains(accent) {
                 return makeAttributedHeading(text: text, accentWord: accent)
             }
-            return makeLabel(
-                text: text,
-                font: .systemFont(ofSize: 28, weight: .bold),
-                color: theme.foreground,
-                lines: 0
-            )
+            return makeLabel(text: text, font: theme.font(size: 28, weight: .bold), color: theme.foreground, lines: 0)
 
         case "subheading":
-            return makeLabel(
-                text: props["text"]?.stringValue ?? "",
-                font: .systemFont(ofSize: 17, weight: .semibold),
-                color: theme.foreground.withAlphaComponent(0.8),
-                lines: 0
-            )
+            return makeLabel(text: props["text"]?.stringValue ?? "", font: theme.font(size: 17, weight: .semibold), color: theme.foreground.withAlphaComponent(0.8), lines: 0)
 
         case "body", "text":
-            return makeLabel(
-                text: props["text"]?.stringValue ?? "",
-                font: .systemFont(ofSize: 15, weight: .regular),
-                color: theme.foreground.withAlphaComponent(0.6),
-                lines: 0
-            )
+            return makeLabel(text: props["text"]?.stringValue ?? "", font: theme.font(size: 15), color: theme.foreground.withAlphaComponent(0.6), lines: 0)
 
         case "badge", "label":
             return makeBadge(text: props["text"]?.stringValue ?? "")
@@ -318,11 +341,12 @@ public final class IntentFlowViewController: UIViewController {
         // ── Input ─────────────────────────────────────────────────────────────
 
         case "text_input":
-            let placeholder = props["placeholder"]?.stringValue ?? ""
-            let collects = props["collects"]?.stringValue ?? props["name"]?.stringValue ?? "input"
-            let fieldLabel = props["label"]?.stringValue
-            let keyboard = props["keyboard"]?.stringValue
-            return makeTextInputField(placeholder: placeholder, collects: collects, fieldLabel: fieldLabel, keyboard: keyboard)
+            return makeTextInputField(
+                placeholder: props["placeholder"]?.stringValue ?? "",
+                collects: props["collects"]?.stringValue ?? props["name"]?.stringValue ?? "input",
+                fieldLabel: props["label"]?.stringValue,
+                keyboard: props["keyboard"]?.stringValue
+            )
 
         // ── Buttons ───────────────────────────────────────────────────────────
 
@@ -337,6 +361,9 @@ public final class IntentFlowViewController: UIViewController {
         case "options", "quiz_option":
             let quizKey = props["quizKey"]?.stringValue ?? screen.metadata?.quizKey ?? "answer"
             let multiSelect = screen.metadata?.multiSelect ?? false
+            let autoAdvance = props["autoAdvance"]?.boolValue ?? !multiSelect
+            let collectsKey = props["collects"]?.stringValue
+            let columns = props["columns"]?.intValue ?? 1
             var options = screen.metadata?.quizOptions ?? []
             if options.isEmpty, let rawOptions = props["options"]?.arrayValue as? [[String: Any]] {
                 options = rawOptions.compactMap { d in
@@ -350,8 +377,11 @@ public final class IntentFlowViewController: UIViewController {
                     )
                 }
             }
-            let autoAdvance = props["autoAdvance"]?.boolValue ?? (!multiSelect)
-            let collectsKey = props["collects"]?.stringValue
+            // Auto-detect 2-col grid: explicit columns=2, or 4+ options all with icons and short labels
+            let useGrid = columns == 2 || (options.count >= 4 && options.allSatisfy { $0.icon != nil && $0.label.count <= 22 })
+            if useGrid {
+                return makeOptionsGrid(quizKey: quizKey, options: options, multiSelect: multiSelect, autoAdvance: autoAdvance, collectsKey: collectsKey)
+            }
             return makeOptionsStack(quizKey: quizKey, options: options, multiSelect: multiSelect, autoAdvance: autoAdvance, collectsKey: collectsKey)
 
         // ── Lists ─────────────────────────────────────────────────────────────
@@ -372,10 +402,11 @@ public final class IntentFlowViewController: UIViewController {
         // ── Social proof ──────────────────────────────────────────────────────
 
         case "testimonial":
-            let quote = props["quote"]?.stringValue ?? props["text"]?.stringValue ?? ""
-            let author = props["author"]?.stringValue ?? props["name"]?.stringValue ?? ""
-            let rating = props["rating"]?.doubleValue.map { Int($0) }
-            return makeTestimonialCard(quote: quote, author: author, rating: rating)
+            return makeTestimonialCard(
+                quote: props["quote"]?.stringValue ?? props["text"]?.stringValue ?? "",
+                author: props["author"]?.stringValue ?? props["name"]?.stringValue ?? "",
+                rating: props["rating"]?.doubleValue.map { Int($0) }
+            )
 
         case "stats", "social_proof":
             let rawItems = props["items"]?.arrayValue as? [[String: Any]] ?? []
@@ -424,18 +455,22 @@ public final class IntentFlowViewController: UIViewController {
         label.font = font
         label.textColor = color
         label.numberOfLines = lines
+        if currentScreenLayout == "center_hero" {
+            label.textAlignment = .center
+        }
         return label
     }
 
     private func makeAttributedHeading(text: String, accentWord: String) -> UILabel {
         let label = UILabel()
         label.numberOfLines = 0
+        if currentScreenLayout == "center_hero" {
+            label.textAlignment = .center
+        }
+        let baseFont = theme.font(size: 28, weight: .bold)
         let attributed = NSMutableAttributedString(
             string: text,
-            attributes: [
-                .font: UIFont.systemFont(ofSize: 28, weight: .bold),
-                .foregroundColor: theme.foreground
-            ]
+            attributes: [.font: baseFont, .foregroundColor: theme.foreground]
         )
         var searchRange = text.startIndex..<text.endIndex
         while let range = text.range(of: accentWord, options: .caseInsensitive, range: searchRange) {
@@ -449,11 +484,12 @@ public final class IntentFlowViewController: UIViewController {
     private func makeHeroView(component: FlowComponent) -> UIView {
         let props = component.props
         let emoji = props["emoji"]?.stringValue ?? props["icon"]?.stringValue ?? "✨"
-        let glowColor: UIColor
-        if let hex = props["glowColor"]?.stringValue {
-            glowColor = UIColor(hex: hex)
-        } else {
-            glowColor = theme.primary
+        let glowColor: UIColor = props["glowColor"]?.stringValue.map { UIColor(hex: $0) } ?? theme.primary
+
+        // If lottieUrl provided on hero_image, use Lottie instead
+        if let lottieUrl = props["lottieUrl"]?.stringValue ?? props["lottie_url"]?.stringValue,
+           let url = URL(string: lottieUrl) {
+            return makeLottieViewFromURL(url: url, loop: true)
         }
 
         let container = UIView()
@@ -478,7 +514,52 @@ public final class IntentFlowViewController: UIViewController {
             emojiLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             emojiLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
+        return container
+    }
 
+    private func makeLottieView(component: FlowComponent) -> UIView {
+        let props = component.props
+        let urlString = props["url"]?.stringValue ?? props["src"]?.stringValue ?? ""
+        let loop = props["loop"]?.boolValue ?? true
+        let height = props["height"]?.doubleValue.map { CGFloat($0) } ?? 240
+        guard let url = URL(string: urlString) else {
+            // Fallback: empty container with fixed height
+            let v = UIView()
+            v.heightAnchor.constraint(equalToConstant: height).isActive = true
+            return v
+        }
+        let container = makeLottieViewFromURL(url: url, loop: loop)
+        container.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return container
+    }
+
+    private func makeLottieViewFromURL(url: URL, loop: Bool) -> UIView {
+        let container = UIView()
+        container.backgroundColor = .clear
+
+        let animView = LottieAnimationView()
+        animView.contentMode = .scaleAspectFit
+        animView.loopMode = loop ? .loop : .playOnce
+        animView.backgroundBehavior = .pauseAndRestore
+        animView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(animView)
+
+        NSLayoutConstraint.activate([
+            animView.topAnchor.constraint(equalTo: container.topAnchor),
+            animView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            animView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            animView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        LottieAnimation.loadedFrom(
+            url: url,
+            closure: { [weak animView] animation in
+                guard let animView else { return }
+                animView.animation = animation
+                animView.play()
+            },
+            animationCache: DefaultAnimationCache.sharedCache
+        )
         return container
     }
 
@@ -490,14 +571,14 @@ public final class IntentFlowViewController: UIViewController {
         if let lbl = fieldLabel, !lbl.isEmpty {
             let label = UILabel()
             label.text = lbl
-            label.font = .systemFont(ofSize: 13, weight: .medium)
+            label.font = theme.font(size: 13, weight: .medium)
             label.textColor = theme.foreground.withAlphaComponent(0.6)
             stack.addArrangedSubview(label)
         }
 
         let field = UITextField()
         field.placeholder = placeholder
-        field.font = .systemFont(ofSize: 16)
+        field.font = theme.font(size: 16)
         field.textColor = theme.foreground
         field.backgroundColor = theme.secondary
         field.layer.cornerRadius = theme.radius
@@ -511,7 +592,7 @@ public final class IntentFlowViewController: UIViewController {
         field.accessibilityIdentifier = collects
 
         switch keyboard {
-        case "email":
+        case "email", "email-address":
             field.keyboardType = .emailAddress
             field.autocapitalizationType = .none
             field.autocorrectionType = .no
@@ -558,7 +639,7 @@ public final class IntentFlowViewController: UIViewController {
 
         let label = UILabel()
         label.text = text
-        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.font = theme.font(size: 13, weight: .semibold)
         label.textColor = theme.primary
         label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(label)
@@ -582,7 +663,7 @@ public final class IntentFlowViewController: UIViewController {
     private func makePrimaryButton(title: String) -> UIButton {
         let btn = UIButton(type: .system)
         btn.setTitle(title, for: .normal)
-        btn.titleLabel?.font = .systemFont(ofSize: 16, weight: .bold)
+        btn.titleLabel?.font = theme.font(size: 16, weight: .bold)
         btn.setTitleColor(theme.primaryForeground, for: .normal)
         btn.backgroundColor = theme.primary
         btn.layer.cornerRadius = theme.radius
@@ -599,7 +680,7 @@ public final class IntentFlowViewController: UIViewController {
     private func makeSecondaryButton(title: String) -> UIButton {
         let btn = UIButton(type: .system)
         btn.setTitle(title, for: .normal)
-        btn.titleLabel?.font = .systemFont(ofSize: 15, weight: .medium)
+        btn.titleLabel?.font = theme.font(size: 15, weight: .medium)
         btn.setTitleColor(theme.foreground.withAlphaComponent(0.6), for: .normal)
         btn.backgroundColor = .clear
         btn.layer.cornerRadius = theme.radius
@@ -609,6 +690,8 @@ public final class IntentFlowViewController: UIViewController {
         btn.addTarget(self, action: #selector(didTapNext), for: .touchUpInside)
         return btn
     }
+
+    // MARK: - Options: list layout
 
     private func makeOptionsStack(quizKey: String, options: [QuizOption], multiSelect: Bool, autoAdvance: Bool, collectsKey: String?) -> UIView {
         let stack = UIStackView()
@@ -629,27 +712,16 @@ public final class IntentFlowViewController: UIViewController {
                     guard let self else { return }
                     if multiSelect {
                         var current = self.quizAnswers[quizKey] as? [String] ?? []
-                        if current.contains(option.value) {
-                            current.removeAll { $0 == option.value }
-                        } else {
-                            current.append(option.value)
-                        }
+                        if current.contains(option.value) { current.removeAll { $0 == option.value } }
+                        else { current.append(option.value) }
                         self.quizAnswers[quizKey] = current
-                        if let key = collectsKey {
-                            self.collectedData[key] = current
-                        }
-                        optView.updateSelection(
-                            (self.quizAnswers[quizKey] as? [String] ?? []).contains(option.value)
-                        )
+                        if let key = collectsKey { self.collectedData[key] = current }
+                        optView.updateSelection((self.quizAnswers[quizKey] as? [String] ?? []).contains(option.value))
                     } else {
                         self.quizAnswers[quizKey] = option.value
-                        if let key = collectsKey {
-                            self.collectedData[key] = option.value
-                        }
+                        if let key = collectsKey { self.collectedData[key] = option.value }
                         if autoAdvance {
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
-                                self.goNext()
-                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { self.goNext() }
                         }
                     }
                 }
@@ -660,9 +732,69 @@ public final class IntentFlowViewController: UIViewController {
         if multiSelect {
             stack.addArrangedSubview(makePrimaryButton(title: "Continue"))
         }
-
         return stack
     }
+
+    // MARK: - Options: 2-column grid layout
+
+    private func makeOptionsGrid(quizKey: String, options: [QuizOption], multiSelect: Bool, autoAdvance: Bool, collectsKey: String?) -> UIView {
+        let outer = UIStackView()
+        outer.axis = .vertical
+        outer.spacing = 10
+
+        stride(from: 0, to: options.count, by: 2).forEach { i in
+            let row = UIStackView()
+            row.axis = .horizontal
+            row.spacing = 10
+            row.distribution = .fillEqually
+
+            let card1 = GridOptionCardView(option: options[i], theme: theme,
+                isSelected: { self.isOptionSelected(quizKey: quizKey, value: options[i].value, multiSelect: multiSelect) },
+                onTap: { [weak self] in self?.handleOptionTap(quizKey: quizKey, option: options[i], multiSelect: multiSelect, autoAdvance: autoAdvance, collectsKey: collectsKey) }
+            )
+            row.addArrangedSubview(card1)
+
+            if i + 1 < options.count {
+                let card2 = GridOptionCardView(option: options[i + 1], theme: theme,
+                    isSelected: { self.isOptionSelected(quizKey: quizKey, value: options[i + 1].value, multiSelect: multiSelect) },
+                    onTap: { [weak self] in self?.handleOptionTap(quizKey: quizKey, option: options[i + 1], multiSelect: multiSelect, autoAdvance: autoAdvance, collectsKey: collectsKey) }
+                )
+                row.addArrangedSubview(card2)
+            } else {
+                row.addArrangedSubview(UIView()) // empty fill
+            }
+
+            outer.addArrangedSubview(row)
+        }
+
+        if multiSelect {
+            outer.addArrangedSubview(makePrimaryButton(title: "Continue"))
+        }
+        return outer
+    }
+
+    private func isOptionSelected(quizKey: String, value: String, multiSelect: Bool) -> Bool {
+        if multiSelect { return (quizAnswers[quizKey] as? [String] ?? []).contains(value) }
+        return quizAnswers[quizKey] as? String == value
+    }
+
+    private func handleOptionTap(quizKey: String, option: QuizOption, multiSelect: Bool, autoAdvance: Bool, collectsKey: String?) {
+        if multiSelect {
+            var current = quizAnswers[quizKey] as? [String] ?? []
+            if current.contains(option.value) { current.removeAll { $0 == option.value } }
+            else { current.append(option.value) }
+            quizAnswers[quizKey] = current
+            if let key = collectsKey { collectedData[key] = current }
+        } else {
+            quizAnswers[quizKey] = option.value
+            if let key = collectsKey { collectedData[key] = option.value }
+            if autoAdvance {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) { [weak self] in self?.goNext() }
+            }
+        }
+    }
+
+    // MARK: - List / stats / social proof
 
     private func makeListView(items: [(String, String)]) -> UIView {
         let stack = UIStackView()
@@ -677,14 +809,14 @@ public final class IntentFlowViewController: UIViewController {
 
             let iconLabel = UILabel()
             iconLabel.text = icon
-            iconLabel.font = .systemFont(ofSize: 15, weight: .bold)
+            iconLabel.font = theme.font(size: 15, weight: .bold)
             iconLabel.textColor = theme.primary
             iconLabel.widthAnchor.constraint(equalToConstant: 20).isActive = true
             iconLabel.textAlignment = .center
 
             let textLabel = UILabel()
             textLabel.text = text
-            textLabel.font = .systemFont(ofSize: 15)
+            textLabel.font = theme.font(size: 15)
             textLabel.textColor = theme.foreground.withAlphaComponent(0.8)
             textLabel.numberOfLines = 0
 
@@ -717,14 +849,14 @@ public final class IntentFlowViewController: UIViewController {
         if let rating, rating > 0 {
             let stars = UILabel()
             stars.text = String(repeating: "★", count: rating)
-            stars.font = .systemFont(ofSize: 16)
+            stars.font = theme.font(size: 16)
             stars.textColor = UIColor(hex: "#F59E0B")
             stack.addArrangedSubview(stars)
         }
 
         let quoteLabel = UILabel()
         quoteLabel.text = "\"\(quote)\""
-        quoteLabel.font = .italicSystemFont(ofSize: 15)
+        quoteLabel.font = UIFont(descriptor: theme.font(size: 15).fontDescriptor.withSymbolicTraits(.traitItalic) ?? theme.font(size: 15).fontDescriptor, size: 15)
         quoteLabel.textColor = theme.foreground
         quoteLabel.numberOfLines = 0
         stack.addArrangedSubview(quoteLabel)
@@ -732,7 +864,7 @@ public final class IntentFlowViewController: UIViewController {
         if !author.isEmpty {
             let authorLabel = UILabel()
             authorLabel.text = "— \(author)"
-            authorLabel.font = .systemFont(ofSize: 13, weight: .medium)
+            authorLabel.font = theme.font(size: 13, weight: .medium)
             authorLabel.textColor = theme.foreground.withAlphaComponent(0.5)
             stack.addArrangedSubview(authorLabel)
         }
@@ -753,13 +885,13 @@ public final class IntentFlowViewController: UIViewController {
 
             let valLabel = UILabel()
             valLabel.text = value
-            valLabel.font = .systemFont(ofSize: 24, weight: .black)
+            valLabel.font = theme.font(size: 24, weight: .black)
             valLabel.textColor = theme.primary
             valLabel.textAlignment = .center
 
             let lblLabel = UILabel()
             lblLabel.text = label
-            lblLabel.font = .systemFont(ofSize: 12, weight: .medium)
+            lblLabel.font = theme.font(size: 12, weight: .medium)
             lblLabel.textColor = theme.foreground.withAlphaComponent(0.5)
             lblLabel.textAlignment = .center
             lblLabel.numberOfLines = 2
@@ -777,7 +909,6 @@ public final class IntentFlowViewController: UIViewController {
         let stack = UIStackView()
         stack.axis = .vertical
         stack.spacing = 12
-
         paywallCards = []
         paywallOptions = []
 
@@ -802,7 +933,6 @@ public final class IntentFlowViewController: UIViewController {
                 stack.addArrangedSubview(makeStaticPricingCard(option: option))
             }
         }
-
         return stack
     }
 
@@ -812,9 +942,7 @@ public final class IntentFlowViewController: UIViewController {
         card.backgroundColor = highlighted ? theme.primary.withAlphaComponent(0.1) : theme.secondary
         card.layer.cornerRadius = theme.radius
         card.layer.borderWidth = highlighted ? 2 : 1
-        card.layer.borderColor = highlighted
-            ? theme.primary.cgColor
-            : theme.foreground.withAlphaComponent(0.12).cgColor
+        card.layer.borderColor = highlighted ? theme.primary.cgColor : theme.foreground.withAlphaComponent(0.12).cgColor
 
         let inner = UIStackView()
         inner.axis = .vertical
@@ -830,24 +958,23 @@ public final class IntentFlowViewController: UIViewController {
 
         let planLabel = UILabel()
         planLabel.text = option["label"] as? String ?? ""
-        planLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        planLabel.font = theme.font(size: 14, weight: .medium)
         planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
         inner.addArrangedSubview(planLabel)
 
         let priceLabel = UILabel()
         priceLabel.text = option["price"] as? String ?? ""
-        priceLabel.font = .systemFont(ofSize: 22, weight: .black)
+        priceLabel.font = theme.font(size: 22, weight: .black)
         priceLabel.textColor = highlighted ? theme.primary : theme.foreground
         inner.addArrangedSubview(priceLabel)
 
         if let perMonth = option["perMonth"] as? String {
             let pm = UILabel()
             pm.text = perMonth
-            pm.font = .systemFont(ofSize: 13)
+            pm.font = theme.font(size: 13)
             pm.textColor = theme.foreground.withAlphaComponent(0.5)
             inner.addArrangedSubview(pm)
         }
-
         return card
     }
 
@@ -863,7 +990,7 @@ public final class IntentFlowViewController: UIViewController {
 
         let label = UILabel()
         label.text = text
-        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.font = theme.font(size: 13, weight: .medium)
         label.textColor = theme.foreground.withAlphaComponent(0.5)
         label.numberOfLines = 0
 
@@ -886,9 +1013,7 @@ public final class IntentFlowViewController: UIViewController {
 
     private func selectPaywallOption(at index: Int) {
         selectedPaywallIndex = index
-        for (i, card) in paywallCards.enumerated() {
-            card.setSelected(i == index)
-        }
+        for (i, card) in paywallCards.enumerated() { card.setSelected(i == index) }
     }
 
     // MARK: - Paywall: StoreKit product loading
@@ -920,7 +1045,6 @@ public final class IntentFlowViewController: UIViewController {
                             ))
                         perMonth = "\(product.priceFormatStyle.format(monthly.decimalValue)) / month"
                     }
-
                     if let offer = sub.introductoryOffer, offer.paymentMode == .freeTrial {
                         let p = offer.period
                         let unitStr: String
@@ -934,18 +1058,17 @@ public final class IntentFlowViewController: UIViewController {
                         perMonth = "Try free for \(unitStr), then \(product.displayPrice)"
                     }
                 }
-
                 self.paywallCards[index].updatePrice(product.displayPrice, perMonth: perMonth)
             }
         }
     }
 
-    // MARK: - Paywall: restore purchases button
+    // MARK: - Paywall: restore purchases
 
     private func injectRestoreButton() {
         let btn = UIButton(type: .system)
         btn.setTitle("Restore Purchases", for: .normal)
-        btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .regular)
+        btn.titleLabel?.font = theme.font(size: 13)
         btn.setTitleColor(theme.foreground.withAlphaComponent(0.4), for: .normal)
         btn.addTarget(self, action: #selector(handleRestorePurchases), for: .touchUpInside)
         contentStack.addArrangedSubview(btn)
@@ -960,10 +1083,7 @@ public final class IntentFlowViewController: UIViewController {
                 Intent.shared.subscriptionStatus = .active(productId: first)
                 self.goNext()
             } else {
-                self.showAlert(
-                    title: "No Purchases Found",
-                    message: "No active subscriptions were found for your Apple ID."
-                )
+                self.showAlert(title: "No Purchases Found", message: "No active subscriptions were found for your Apple ID.")
             }
         }
     }
@@ -971,18 +1091,10 @@ public final class IntentFlowViewController: UIViewController {
     // MARK: - Paywall: purchase
 
     @objc private func handlePaywallPurchaseTap() {
-        let index = selectedPaywallIndex
-            ?? paywallOptions.firstIndex(where: { $0.highlighted })
-            ?? 0
-
+        let index = selectedPaywallIndex ?? paywallOptions.firstIndex(where: { $0.highlighted }) ?? 0
         guard index < paywallOptions.count else { goNext(); return }
         let option = paywallOptions[index]
-
-        guard let productId = option.productId else {
-            goNext()
-            return
-        }
-
+        guard let productId = option.productId else { goNext(); return }
         Task { @MainActor [weak self] in
             await self?.executePurchase(productId: productId, cardIndex: index)
         }
@@ -997,10 +1109,7 @@ public final class IntentFlowViewController: UIViewController {
             screenId: currentScreen?.id,
             properties: ["product_id": AnyCodable(productId)]
         )
-
-        if cardIndex < paywallCards.count {
-            paywallCards[cardIndex].setLoading(true)
-        }
+        if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(true) }
 
         guard let products = try? await IntentPurchaseManager.shared.loadProducts(ids: [productId]),
               let product = products.first else {
@@ -1010,26 +1119,13 @@ public final class IntentFlowViewController: UIViewController {
         }
 
         do {
-            let result = try await IntentPurchaseManager.shared.purchase(
-                product: product,
-                flowId: flow.id,
-                screenId: currentScreen?.id
-            )
-
+            let result = try await IntentPurchaseManager.shared.purchase(product: product, flowId: flow.id, screenId: currentScreen?.id)
             if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
-
             switch result {
-            case .success:
-                goNext()
-
-            case .cancelled:
-                break
-
+            case .success: goNext()
+            case .cancelled: break
             case .pending:
-                showAlert(
-                    title: "Purchase Pending",
-                    message: "Your purchase is awaiting approval. You'll unlock access once it's approved."
-                )
+                showAlert(title: "Purchase Pending", message: "Your purchase is awaiting approval. You'll unlock access once it's approved.")
             }
         } catch {
             if cardIndex < paywallCards.count { paywallCards[cardIndex].setLoading(false) }
@@ -1057,15 +1153,38 @@ public final class IntentFlowViewController: UIViewController {
     private func goNext() {
         if screenIndex >= screens.count - 1 {
             Intent.shared.trackFlowComplete(flowId: flow.id)
-            dismiss(animated: true) { [weak self] in
-                self?.onComplete?()
-            }
-        } else {
+            dismiss(animated: true) { [weak self] in self?.onComplete?() }
+            return
+        }
+
+        let style = flow.schema.settings?.transitionStyle ?? "slide"
+
+        if style == "fade" {
             screenIndex += 1
-            UIView.transition(with: contentStack, duration: 0.25, options: .transitionCrossDissolve) {
+            UIView.transition(with: scrollView, duration: 0.25, options: .transitionCrossDissolve) {
                 self.renderCurrentScreen()
             }
             scrollView.setContentOffset(.zero, animated: false)
+            return
+        }
+
+        // Slide transition: snapshot current state, slide new content in from right
+        let snapshot = scrollView.snapshotView(afterScreenUpdates: false)
+        screenIndex += 1
+        renderCurrentScreen()
+        scrollView.setContentOffset(.zero, animated: false)
+
+        if let snapshot {
+            snapshot.frame = scrollView.frame
+            view.addSubview(snapshot)
+            scrollView.transform = CGAffineTransform(translationX: view.bounds.width, y: 0)
+            UIView.animate(withDuration: 0.34, delay: 0, usingSpringWithDamping: 0.86, initialSpringVelocity: 0.2, options: .curveEaseOut) {
+                self.scrollView.transform = .identity
+                snapshot.transform = CGAffineTransform(translationX: -self.view.bounds.width * 0.3, y: 0)
+                snapshot.alpha = 0
+            } completion: { _ in
+                snapshot.removeFromSuperview()
+            }
         }
     }
 }
@@ -1084,32 +1203,25 @@ private struct PaywallOption {
 // MARK: - PricingCardView
 
 private final class PricingCardView: UIView {
-
     private let option: PaywallOption
     private let theme: ResolvedTheme
     private let onTap: () -> Void
-
     private let priceLabel = UILabel()
     private let perMonthLabel = UILabel()
     private let loadingIndicator = UIActivityIndicatorView(style: .medium)
-
     private var _isSelected = false
 
     init(option: PaywallOption, theme: ResolvedTheme, onTap: @escaping () -> Void) {
-        self.option = option
-        self.theme = theme
-        self.onTap = onTap
+        self.option = option; self.theme = theme; self.onTap = onTap
         super.init(frame: .zero)
         setup()
     }
-
     required init?(coder: NSCoder) { fatalError() }
 
     private func setup() {
         layer.cornerRadius = theme.radius
         layer.borderWidth = 1.5
         updateAppearance()
-
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
 
         let inner = UIStackView()
@@ -1124,24 +1236,22 @@ private final class PricingCardView: UIView {
             inner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -18),
         ])
 
-        if let badge = option.badge {
-            inner.addArrangedSubview(makeBadge(text: badge))
-        }
+        if let badge = option.badge { inner.addArrangedSubview(makeBadge(text: badge)) }
 
         let planLabel = UILabel()
         planLabel.text = option.label
-        planLabel.font = .systemFont(ofSize: 14, weight: .medium)
+        planLabel.font = theme.font(size: 14, weight: .medium)
         planLabel.textColor = theme.foreground.withAlphaComponent(0.7)
         inner.addArrangedSubview(planLabel)
 
         priceLabel.text = option.fallbackPrice
-        priceLabel.font = .systemFont(ofSize: 22, weight: .black)
+        priceLabel.font = theme.font(size: 22, weight: .black)
         priceLabel.textColor = option.highlighted ? theme.primary : theme.foreground
         inner.addArrangedSubview(priceLabel)
 
         if let pm = option.fallbackPerMonth, !pm.isEmpty {
             perMonthLabel.text = pm
-            perMonthLabel.font = .systemFont(ofSize: 13)
+            perMonthLabel.font = theme.font(size: 13)
             perMonthLabel.textColor = theme.foreground.withAlphaComponent(0.5)
             inner.addArrangedSubview(perMonthLabel)
         }
@@ -1160,14 +1270,12 @@ private final class PricingCardView: UIView {
         let container = UIView()
         container.backgroundColor = theme.primary
         container.layer.cornerRadius = 100
-
         let label = UILabel()
         label.text = text
-        label.font = .systemFont(ofSize: 11, weight: .bold)
+        label.font = theme.font(size: 11, weight: .bold)
         label.textColor = .white
         label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(label)
-
         let wrapper = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(container)
@@ -1185,41 +1293,19 @@ private final class PricingCardView: UIView {
 
     func updatePrice(_ price: String, perMonth: String?) {
         priceLabel.text = price
-        if let pm = perMonth, !pm.isEmpty {
-            perMonthLabel.text = pm
-            perMonthLabel.isHidden = false
-        }
+        if let pm = perMonth, !pm.isEmpty { perMonthLabel.text = pm; perMonthLabel.isHidden = false }
     }
-
-    func setSelected(_ selected: Bool) {
-        _isSelected = selected
-        UIView.animate(withDuration: 0.18) { self.updateAppearance() }
-    }
-
-    func setLoading(_ loading: Bool) {
-        loading ? loadingIndicator.startAnimating() : loadingIndicator.stopAnimating()
-        isUserInteractionEnabled = !loading
-    }
+    func setSelected(_ selected: Bool) { _isSelected = selected; UIView.animate(withDuration: 0.18) { self.updateAppearance() } }
+    func setLoading(_ loading: Bool) { loading ? loadingIndicator.startAnimating() : loadingIndicator.stopAnimating(); isUserInteractionEnabled = !loading }
 
     private func updateAppearance() {
-        let selectedOrHighlighted = _isSelected || option.highlighted
-        backgroundColor = _isSelected
-            ? theme.primary.withAlphaComponent(0.15)
-            : option.highlighted
-            ? theme.primary.withAlphaComponent(0.07)
-            : theme.secondary
-        layer.borderColor = _isSelected
-            ? theme.primary.cgColor
-            : option.highlighted
-            ? theme.primary.withAlphaComponent(0.4).cgColor
-            : theme.foreground.withAlphaComponent(0.12).cgColor
-        _ = selectedOrHighlighted
+        backgroundColor = _isSelected ? theme.primary.withAlphaComponent(0.15) : option.highlighted ? theme.primary.withAlphaComponent(0.07) : theme.secondary
+        layer.borderColor = _isSelected ? theme.primary.cgColor : option.highlighted ? theme.primary.withAlphaComponent(0.4).cgColor : theme.foreground.withAlphaComponent(0.12).cgColor
     }
-
     @objc private func tapped() { onTap() }
 }
 
-// MARK: - OptionCardView
+// MARK: - OptionCardView (list layout)
 
 private final class OptionCardView: UIView {
     private let option: QuizOption
@@ -1229,14 +1315,10 @@ private final class OptionCardView: UIView {
     private let checkView = UIView()
 
     init(option: QuizOption, theme: ResolvedTheme, isSelected: @escaping () -> Bool, onTap: @escaping () -> Void) {
-        self.option = option
-        self.theme = theme
-        self._isSelected = isSelected
-        self.onTap = onTap
+        self.option = option; self.theme = theme; self._isSelected = isSelected; self.onTap = onTap
         super.init(frame: .zero)
         setup()
     }
-
     required init?(coder: NSCoder) { fatalError() }
 
     private func setup() {
@@ -1264,22 +1346,19 @@ private final class OptionCardView: UIView {
         let textStack = UIStackView()
         textStack.axis = .vertical
         textStack.spacing = 2
-
         let titleLabel = UILabel()
         titleLabel.text = option.label
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        titleLabel.font = theme.font(size: 15, weight: .semibold)
         titleLabel.textColor = theme.foreground
         textStack.addArrangedSubview(titleLabel)
-
         if let desc = option.description, !desc.isEmpty {
             let descLabel = UILabel()
             descLabel.text = desc
-            descLabel.font = .systemFont(ofSize: 13)
+            descLabel.font = theme.font(size: 13)
             descLabel.textColor = theme.foreground.withAlphaComponent(0.5)
             descLabel.numberOfLines = 2
             textStack.addArrangedSubview(descLabel)
         }
-
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(UIView())
 
@@ -1287,10 +1366,9 @@ private final class OptionCardView: UIView {
         checkView.layer.cornerRadius = 11
         checkView.widthAnchor.constraint(equalToConstant: 22).isActive = true
         checkView.heightAnchor.constraint(equalToConstant: 22).isActive = true
-
         let checkLabel = UILabel()
         checkLabel.text = "✓"
-        checkLabel.font = .systemFont(ofSize: 12, weight: .bold)
+        checkLabel.font = theme.font(size: 12, weight: .bold)
         checkLabel.textColor = .white
         checkLabel.textAlignment = .center
         checkLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1299,8 +1377,8 @@ private final class OptionCardView: UIView {
             checkLabel.centerXAnchor.constraint(equalTo: checkView.centerXAnchor),
             checkLabel.centerYAnchor.constraint(equalTo: checkView.centerYAnchor),
         ])
-
         row.addArrangedSubview(checkView)
+
         NSLayoutConstraint.activate([
             row.topAnchor.constraint(equalTo: topAnchor, constant: 16),
             row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16),
@@ -1309,22 +1387,79 @@ private final class OptionCardView: UIView {
         ])
     }
 
-    func updateSelection(_ selected: Bool) {
-        UIView.animate(withDuration: 0.18) { self.updateColors() }
+    func updateSelection(_ selected: Bool) { UIView.animate(withDuration: 0.18) { self.updateColors() } }
+    private func updateColors() {
+        let selected = _isSelected()
+        layer.borderColor = selected ? theme.primary.cgColor : theme.foreground.withAlphaComponent(0.15).cgColor
+        backgroundColor = selected ? theme.primary.withAlphaComponent(0.1) : theme.secondary
+        checkView.alpha = selected ? 1 : 0
+    }
+    @objc private func tapped() { onTap() }
+}
+
+// MARK: - GridOptionCardView (2-column layout)
+
+private final class GridOptionCardView: UIView {
+    private let option: QuizOption
+    private let theme: ResolvedTheme
+    private let _isSelected: () -> Bool
+    private let onTap: () -> Void
+
+    init(option: QuizOption, theme: ResolvedTheme, isSelected: @escaping () -> Bool, onTap: @escaping () -> Void) {
+        self.option = option; self.theme = theme; self._isSelected = isSelected; self.onTap = onTap
+        super.init(frame: .zero)
+        setup()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setup() {
+        layer.cornerRadius = theme.radius
+        layer.borderWidth = 1.5
+        updateColors()
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+
+        let stack = UIStackView()
+        stack.axis = .vertical
+        stack.alignment = .center
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 20),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -20),
+            heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
+        ])
+
+        if let icon = option.icon, !icon.isEmpty {
+            let iconLabel = UILabel()
+            iconLabel.text = icon
+            iconLabel.font = .systemFont(ofSize: 36)
+            iconLabel.textAlignment = .center
+            stack.addArrangedSubview(iconLabel)
+        }
+
+        let titleLabel = UILabel()
+        titleLabel.text = option.label
+        titleLabel.font = theme.font(size: 13, weight: .semibold)
+        titleLabel.textColor = theme.foreground
+        titleLabel.textAlignment = .center
+        titleLabel.numberOfLines = 2
+        stack.addArrangedSubview(titleLabel)
     }
 
     private func updateColors() {
         let selected = _isSelected()
-        layer.borderColor = selected
-            ? theme.primary.cgColor
-            : theme.foreground.withAlphaComponent(0.15).cgColor
-        backgroundColor = selected
-            ? theme.primary.withAlphaComponent(0.1)
-            : theme.secondary
-        checkView.alpha = selected ? 1 : 0
+        layer.borderColor = selected ? theme.primary.cgColor : theme.foreground.withAlphaComponent(0.15).cgColor
+        backgroundColor = selected ? theme.primary.withAlphaComponent(0.1) : theme.secondary
     }
 
-    @objc private func tapped() { onTap() }
+    @objc private func tapped() {
+        onTap()
+        UIView.animate(withDuration: 0.18) { self.updateColors() }
+    }
 }
 
 // MARK: - RadialGlowView
@@ -1339,7 +1474,6 @@ private final class RadialGlowView: UIView {
         isUserInteractionEnabled = false
         backgroundColor = .clear
     }
-
     required init?(coder: NSCoder) { fatalError() }
 
     override func layoutSubviews() {
@@ -1347,10 +1481,7 @@ private final class RadialGlowView: UIView {
         if glowLayer == nil {
             let layer = CAGradientLayer()
             layer.type = .radial
-            layer.colors = [
-                color.withAlphaComponent(0.4).cgColor,
-                color.withAlphaComponent(0).cgColor,
-            ]
+            layer.colors = [color.withAlphaComponent(0.4).cgColor, color.withAlphaComponent(0).cgColor]
             layer.startPoint = CGPoint(x: 0.5, y: 0.5)
             layer.endPoint = CGPoint(x: 1.0, y: 1.0)
             self.layer.addSublayer(layer)
@@ -1370,6 +1501,7 @@ struct ResolvedTheme {
     let primaryForeground: UIColor
     let secondary: UIColor
     let radius: CGFloat
+    private let fontDesign: UIFontDescriptor.SystemDesign
 
     init(from theme: FlowTheme?) {
         background = UIColor(hex: theme?.background ?? "#0a0a0a")
@@ -1379,6 +1511,19 @@ struct ResolvedTheme {
         primaryForeground = UIColor(hex: theme?.primaryForeground ?? "#ffffff")
         secondary = UIColor(hex: theme?.secondary ?? "#1a1a1a")
         radius = theme?.radius ?? 12
+        switch theme?.fontFamily {
+        case "rounded": fontDesign = .rounded
+        case "serif":   fontDesign = .serif
+        case "mono", "monospaced": fontDesign = .monospaced
+        default:        fontDesign = .default
+        }
+    }
+
+    func font(size: CGFloat, weight: UIFont.Weight = .regular) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: weight)
+        guard fontDesign != .default,
+              let descriptor = base.fontDescriptor.withDesign(fontDesign) else { return base }
+        return UIFont(descriptor: descriptor, size: size)
     }
 }
 
@@ -1392,19 +1537,9 @@ extension UIColor {
         Scanner(string: str).scanHexInt64(&rgb)
         let length = str.count
         if length == 6 {
-            self.init(
-                red:   CGFloat((rgb >> 16) & 0xFF) / 255,
-                green: CGFloat((rgb >>  8) & 0xFF) / 255,
-                blue:  CGFloat( rgb        & 0xFF) / 255,
-                alpha: 1
-            )
+            self.init(red: CGFloat((rgb >> 16) & 0xFF) / 255, green: CGFloat((rgb >> 8) & 0xFF) / 255, blue: CGFloat(rgb & 0xFF) / 255, alpha: 1)
         } else if length == 8 {
-            self.init(
-                red:   CGFloat((rgb >> 24) & 0xFF) / 255,
-                green: CGFloat((rgb >> 16) & 0xFF) / 255,
-                blue:  CGFloat((rgb >>  8) & 0xFF) / 255,
-                alpha: CGFloat( rgb        & 0xFF) / 255
-            )
+            self.init(red: CGFloat((rgb >> 24) & 0xFF) / 255, green: CGFloat((rgb >> 16) & 0xFF) / 255, blue: CGFloat((rgb >> 8) & 0xFF) / 255, alpha: CGFloat(rgb & 0xFF) / 255)
         } else {
             self.init(white: 0.5, alpha: 1)
         }

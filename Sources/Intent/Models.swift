@@ -143,6 +143,7 @@ public struct FlowSettings: Codable {
     public let showProgress: Bool?
     public let progressStyle: String?
     public let exitBehavior: String?
+    public let transitionStyle: String?  // "slide" | "fade"
 }
 
 // MARK: - Event
