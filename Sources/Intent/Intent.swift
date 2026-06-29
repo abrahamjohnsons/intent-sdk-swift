@@ -57,7 +57,7 @@ public final class Intent {
         userId: String = "anonymous",
         acquisitionChannel: String? = nil,
         source: String? = nil,
-        apiBaseURL: String = "https://intent-ai.vercel.app",
+        apiBaseURL: String = "https://useintent.vercel.app",
         debug: Bool = false
     ) {
         shared.config = IntentConfig(
@@ -79,7 +79,7 @@ public final class Intent {
         sdkKey: String,
         userId: String = "anonymous",
         acquisitionChannel: IntentAcquisitionChannel,
-        apiBaseURL: String = "https://intent-ai.vercel.app",
+        apiBaseURL: String = "https://useintent.vercel.app",
         debug: Bool = false
     ) {
         configure(
@@ -118,7 +118,7 @@ public final class Intent {
     public static func resolveAttribution(
         projectId: String,
         sdkKey: String,
-        apiBaseURL: String = "https://intent-ai.vercel.app"
+        apiBaseURL: String = "https://useintent.vercel.app"
     ) async -> String? {
         let cacheKey = "intent_attribution_\(projectId)"
 
